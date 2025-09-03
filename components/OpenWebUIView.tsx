@@ -123,61 +123,61 @@ function buildInjection(baseUrl: string) {
       }, true);
       document.addEventListener('click', function(e){
         try {
-          var btn = e && e.target && (e.target.closest ? e.target.closest('button,[role="button"]') : null);
-          if (btn) {
-            var parts = (window.location.pathname || '').split('/').filter(Boolean);
-            var idx = parts.indexOf('c');
-            var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
-            // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
-            var rnVal1 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-            var offline1 = (window.__owui_wasOffline === true) || (rnVal1 === false);
-            if (offline1) {
-              var textNow1 = '';
-              var node1 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-              if (node1) {
-                if ('value' in node1) { textNow1 = (node1.value||'').trim(); }
-                else { textNow1 = (node1.innerText || node1.textContent || '').trim(); }
-              }
-              try { window.__owui_lastTextCandidate = textNow1; } catch {}
-              if (textNow1 && cid) {
-                post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'click', chatId: cid, len: textNow1.length });
-                post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow1 } });
-                // Clear input to reflect queued state
-                try {
-                  if (node1) {
-                    if ('value' in node1) { node1.value = ''; try { node1.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
-                    else { node1.innerText = ''; try { node1.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
-                  }
-                } catch {}
-              }
-              try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
-              return;
+          // Only handle clicks on the explicit Send button to avoid blocking other buttons when offline
+          var sendBtn = e && e.target && (e.target.closest ? e.target.closest('#send-message-button') : null);
+          if (!sendBtn) { return; }
+          var parts = (window.location.pathname || '').split('/').filter(Boolean);
+          var idx = parts.indexOf('c');
+          var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+          // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
+          var rnVal1 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+          var offline1 = (window.__owui_wasOffline === true) || (rnVal1 === false);
+          if (offline1) {
+            var textNow1 = '';
+            var node1 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+            if (node1) {
+              if ('value' in node1) { textNow1 = (node1.value||'').trim(); }
+              else { textNow1 = (node1.innerText || node1.textContent || '').trim(); }
             }
-            var startTick = Date.now();
-            // capture candidate text immediately
-            var textNow = '';
-            var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-            if (node) {
-              if ('value' in node) { textNow = (node.value||'').trim(); }
-              else { textNow = (node.innerText || node.textContent || '').trim(); }
-            }
-            try { window.__owui_lastTextCandidate = textNow; } catch {}
-            post({ type: 'debug', scope: 'injection', event: 'buttonClick', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
-            // Fallback: if offline and no completion fetch follows shortly, queue from DOM
-            setTimeout(function(){
+            try { window.__owui_lastTextCandidate = textNow1; } catch {}
+            if (textNow1 && cid) {
+              post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'clickSend', chatId: cid, len: textNow1.length });
+              post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow1 } });
+              // Clear input to reflect queued state
               try {
-                var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-                var offline = (window.__owui_wasOffline === true) || (rnVal === false);
-                if (!offline) return;
-                if ((window.__owui_lastCompletionTick||0) > startTick) return;
-                var text = String(window.__owui_lastTextCandidate||'').trim();
-                if (text && cid) {
-                  post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
-                  post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
+                if (node1) {
+                  if ('value' in node1) { node1.value = ''; try { node1.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
+                  else { node1.innerText = ''; try { node1.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
                 }
               } catch {}
-            }, 1200);
+            }
+            try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
+            return;
           }
+          var startTick = Date.now();
+          // capture candidate text immediately
+          var textNow = '';
+          var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+          if (node) {
+            if ('value' in node) { textNow = (node.value||'').trim(); }
+            else { textNow = (node.innerText || node.textContent || '').trim(); }
+          }
+          try { window.__owui_lastTextCandidate = textNow; } catch {}
+          post({ type: 'debug', scope: 'injection', event: 'buttonClickSend', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
+          // Fallback: if offline and no completion fetch follows shortly, queue from DOM
+          setTimeout(function(){
+            try {
+              var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+              var offline = (window.__owui_wasOffline === true) || (rnVal === false);
+              if (!offline) return;
+              if ((window.__owui_lastCompletionTick||0) > startTick) return;
+              var text = String(window.__owui_lastTextCandidate||'').trim();
+              if (text && cid) {
+                post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
+                post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
+              }
+            } catch {}
+          }, 1200);
         } catch {}
       }, true);
     } catch {}
