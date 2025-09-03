@@ -121,6 +121,41 @@ function buildInjection(baseUrl: string) {
           }
         } catch {}
       }, true);
+      // Backup: intercept form submit within the compose container (contains #chat-input)
+      document.addEventListener('submit', function(e){
+        try {
+          var tgt = e && e.target;
+          var form = (tgt && (tgt.tagName === 'FORM' ? tgt : (tgt.closest ? tgt.closest('form') : null))) || null;
+          if (!form) { return; }
+          var hasChatInput = !!(form && form.querySelector && form.querySelector('#chat-input'));
+          if (!hasChatInput) { return; }
+          var parts = (window.location.pathname || '').split('/').filter(Boolean);
+          var idx = parts.indexOf('c');
+          var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+          var rnValS = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+          var offlineS = (window.__owui_wasOffline === true) || (rnValS === false);
+          if (!offlineS) { return; }
+          var textNowS = '';
+          var nodeS = form.querySelector('textarea, [contenteditable="true"], [role="textbox"]') || document.querySelector('#chat-input') || document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+          if (nodeS) {
+            if ('value' in nodeS) { textNowS = (nodeS.value||'').trim(); }
+            else { textNowS = (nodeS.innerText || nodeS.textContent || '').trim(); }
+          }
+          try { window.__owui_lastTextCandidate = textNowS; } catch {}
+          if (textNowS && cid) {
+            post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'submit', chatId: cid, len: textNowS.length });
+            post({ type: 'queueMessage', chatId: cid, body: { uiText: textNowS } });
+            try {
+              if (nodeS) {
+                if ('value' in nodeS) { nodeS.value = ''; try { nodeS.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
+                else { nodeS.innerText = ''; try { nodeS.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
+              }
+            } catch {}
+          }
+          try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
+          return;
+        } catch {}
+      }, true);
       document.addEventListener('click', function(e){
         try {
           // Only handle clicks on the explicit Send button to avoid blocking other buttons when offline
