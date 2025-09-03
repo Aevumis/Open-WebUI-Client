@@ -160,3 +160,30 @@ This document tracks issues encountered and how they were fixed, to avoid regres
 - Notes:
   - The first simulated click timed out (~8s) just before completion arrived; a second attempt succeeded ~200ms later. To reduce retries, consider increasing the wait window to 9–10s.
   - No placeholder message appeared offline; only one message was delivered after reconnect.
+
+---
+
+## 2025-09-03 – Full sync startup issue (token httpOnly; WebView-assisted sync)
+
+- Symptom:
+  - On app launch, `[sync] maybeFullSync: no token yet, skipping for now` and outbox `[drain no token, abort]` repeated.
+  - WebView injection logs showed `injected`/`hasInjected`, but no `authToken` messages and no initial full sync.
+- Root Cause:
+  - Server auth was stored in httpOnly cookies (e.g., `authjs.session-token`). The RN WebView JavaScript environment cannot read httpOnly cookies via `document.cookie`, so our injection could not capture/post a token to native storage.
+  - `maybeFullSync()` waited ~5s for a token and then exited, with no fallback to sync using cookie auth alone.
+- Fix:
+  - `components/OpenWebUIView.tsx`:
+    - Added WebView-assisted full sync that runs on injection events when no native token is saved. It fetches `/api/v1/chats/?page=N` and `/api/v1/chats/:id` with `credentials: 'include'`, then posts `{ type: 'cacheResponse', url, data }` for caching and finally `{ type: 'syncDone' }` to mark completion.
+    - Kept broadened cookie-name detection to capture a token if it is ever non-httpOnly (`authjs.session-token`, `__Secure-*`, `next-auth.session-token`, `token`, generic `*session-token`).
+  - `app/client.tsx`:
+    - Added a retry loop to re-run `maybeFullSync()` every 5s until `isFullSyncDone()` is set, so native full sync will proceed if/when a token becomes available.
+  - `lib/sync.ts`:
+    - Ensured fetch includes cookie-based auth headers as a fallback.
+  - Logging:
+    - Enabled `'webview'` scope to surface injection and sync debug events.
+- Validation (logs):
+  - `[webview] debug { "event": "syncStart", "scope": "injection" }` appears after injection.
+  - `[sync] done flag set (webview-assisted) { conversations: 30, messages: 168, host: "openai.ayushpalak.com" }` is logged, followed by `[sync] fullSync already done, stopping retries`.
+- Notes:
+  - Duplicate `syncStart`/`done` can occur if the WebView re-injects around navigations; current behavior is benign. We can further gate with a page-level flag (e.g., `window.__owui_syncing`) if needed to eliminate duplicates.
+  - If a non-httpOnly token becomes available in the future, native-token-based full sync will take over automatically.

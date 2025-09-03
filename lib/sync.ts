@@ -11,6 +11,8 @@ async function fetchJSON(url: string, token: string) {
       accept: "application/json",
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      // Fallback for cookie-based auth servers (e.g., authjs.session-token)
+      cookie: `authjs.session-token=${token}; token=${token}`,
     },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -90,9 +92,23 @@ export async function isFullSyncDone(baseUrl: string) {
 export async function maybeFullSync(baseUrl: string) {
   const done = await isFullSyncDone(baseUrl);
   if (done) return null;
+  const host = new URL(baseUrl).host;
+  // Wait briefly for token to arrive from WebView if not present yet
+  let token = await getToken(host);
+  let tries = 0;
+  while (!token && tries < 20) { // up to ~5s @250ms
+    await new Promise((r) => setTimeout(r, 250));
+    token = await getToken(host);
+    tries++;
+  }
+  if (!token) {
+    logDebug('sync', 'maybeFullSync: no token yet, skipping for now', { host });
+    return null;
+  }
   try {
     return await fullSync(baseUrl);
-  } catch {
+  } catch (e) {
+    logDebug('sync', 'maybeFullSync error', { error: (e as any)?.message || String(e) });
     return null;
   }
 }

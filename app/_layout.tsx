@@ -7,7 +7,7 @@ export default function RootLayout() {
   setLogConfig({
     level: typeof __DEV__ !== 'undefined' && __DEV__ ? 'debug' : 'info',
     scopes: (typeof __DEV__ !== 'undefined' && __DEV__)
-      ? ['sync', 'outbox', 'cache', 'net', 'webviewDrain'] // add 'webview' to see injection debug
+      ? ['sync', 'outbox', 'cache', 'net', 'webviewDrain', 'webview']
       : ['sync', 'outbox', 'cache', 'net'],
   });
   return (

@@ -5,7 +5,8 @@ import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { cacheApiResponse, type CachedEntry } from "../lib/cache";
-import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems } from "../lib/outbox";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
 
 // WebView debug logs are now gated via centralized logger scopes/levels
@@ -226,7 +227,30 @@ function buildInjection(baseUrl: string) {
 
     function checkAuthOnce() {
       if (sentAuth) return;
-      const t = getCookie('token') || getCookie('authjs.session-token');
+      // Try common cookie names used by Auth.js/NextAuth and a generic session-token fallback
+      const names = [
+        'authjs.session-token',
+        '__Secure-authjs.session-token',
+        'next-auth.session-token',
+        '__Secure-next-auth.session-token',
+        'token',
+      ];
+      let t = null;
+      for (var i = 0; i < names.length && !t; i++) { t = getCookie(names[i]); }
+      if (!t) {
+        try {
+          var parts = (document.cookie || '').split(';');
+          for (var j = 0; j < parts.length && !t; j++) {
+            var kv = parts[j].trim();
+            var eq = kv.indexOf('=');
+            if (eq > 0) {
+              var k = kv.slice(0, eq);
+              var v = decodeURIComponent(kv.slice(eq + 1));
+              if (/session-token$/i.test(k)) { t = v; break; }
+            }
+          }
+        } catch (_) {}
+      }
       if (t) { sentAuth = true; post({ type: 'authToken', token: t }); post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' }); }
     }
 
@@ -419,6 +443,7 @@ function buildInjection(baseUrl: string) {
 export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; online: boolean }) {
   const webref = useRef<WebView>(null);
   const drainingRef = React.useRef(false);
+  const syncingRef = React.useRef(false);
   const baseUrlRef = React.useRef(baseUrl);
   React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
 
@@ -505,11 +530,85 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
     } catch {}
   }, []);
 
+  // WebView-assisted full sync for when cookies exist but native token is not available (httpOnly)
+  const injectWebSync = useCallback(async () => {
+    try {
+      const host = new URL(baseUrlRef.current).host;
+      const { limitConversations, rps } = await getSettings(host);
+      const minInterval = Math.max(0, Math.floor(1000 / Math.max(1, rps)));
+      const js = `(() => { (async () => {
+        function post(m){ try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(m)); } catch(_){} }
+        try {
+          if (window.__owui_syncing) { post({ type: 'debug', scope: 'injection', event: 'syncSkipAlreadyRunning' }); return; }
+          window.__owui_syncing = true;
+          post({ type: 'debug', scope: 'injection', event: 'syncStart' });
+          const LIMIT = ${Number.isFinite(0) ? '' : ''}${limitConversations};
+          const MIN = ${minInterval};
+          let page = 1;
+          const chats = [];
+          for (;;) {
+            const res = await fetch('/api/v1/chats/?page=' + page, { headers: { accept: 'application/json' }, credentials: 'include' });
+            if (!res || !res.ok) break;
+            const data = await res.json();
+            if (!Array.isArray(data) || data.length === 0) break;
+            for (let i=0;i<data.length;i++) {
+              const it = data[i];
+              chats.push({ id: it.id, title: it.title });
+              if (chats.length >= LIMIT) break;
+            }
+            if (chats.length >= LIMIT) break;
+            if (MIN) { await new Promise(r=>setTimeout(r, MIN)); }
+            page += 1;
+          }
+          let messages = 0;
+          for (let i=0;i<chats.length;i++) {
+            const c = chats[i];
+            const url = '/api/v1/chats/' + c.id;
+            try {
+              const res = await fetch(url, { headers: { accept: 'application/json' }, credentials: 'include' });
+              if (res && res.ok) {
+                const data = await res.json();
+                if (data && data.archived === true) {
+                  // skip archived
+                } else {
+                  try { post({ type: 'cacheResponse', url: (location.origin + url), data }); } catch(_){ }
+                  try {
+                    const mcount = Array.isArray(data && data.chat && data.chat.messages) ? data.chat.messages.length : (Array.isArray(data && data.messages) ? data.messages.length : 0);
+                    messages += (mcount || 0);
+                  } catch(_){}
+                }
+              }
+            } catch(_){}
+            if (MIN) { await new Promise(r=>setTimeout(r, MIN)); }
+          }
+          post({ type: 'syncDone', conversations: chats.length, messages });
+        } catch (e) {
+          try { post({ type: 'debug', scope: 'injection', event: 'syncError', message: String(e && e.message || e) }); } catch(_){}
+        } finally {
+          try { window.__owui_syncing = false; } catch(_){ }
+        }
+      })(); })();`;
+      syncingRef.current = true;
+      webref.current?.injectJavaScript(js);
+    } catch {}
+  }, []);
+
   const onMessage = useCallback(async (e: WebViewMessageEvent) => {
     try {
       const msg = JSON.parse(e.nativeEvent.data || '{}');
       const host = new URL(baseUrl).host;
-      if (msg.type === 'debug') { logDebug('webview', 'debug', msg); return; }
+      if (msg.type === 'debug') {
+        logDebug('webview', 'debug', msg);
+        try {
+          if ((msg.event === 'injected' || msg.event === 'hasInjected') && !syncingRef.current) {
+            const tok = await getToken(host);
+            if (!tok) {
+              await injectWebSync();
+            }
+          }
+        } catch {}
+        return;
+      }
       if (msg.type === 'drainBatchResult' && Array.isArray(msg.successIds)) {
         await removeOutboxItems(host, msg.successIds);
         const remaining = await count(host);
@@ -530,6 +629,14 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       if (msg.type === 'authToken' && typeof msg.token === 'string') {
         await setToken(host, msg.token);
         logInfo('outbox', 'token saved for host', { host });
+        return;
+      }
+      if (msg.type === 'syncDone') {
+        try {
+          await AsyncStorage.setItem(`sync:done:${host}`, String(Date.now()));
+          logInfo('sync', 'done flag set (webview-assisted)', { host, conversations: msg.conversations, messages: msg.messages });
+        } catch {}
+        syncingRef.current = false;
         return;
       }
       if (msg.type === 'queueMessage' && msg.chatId && msg.body) {

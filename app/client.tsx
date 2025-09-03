@@ -5,7 +5,7 @@ import { useLocalSearchParams, router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
-import { maybeFullSync } from "../lib/sync";
+import { maybeFullSync, isFullSyncDone } from "../lib/sync";
 import { getCacheIndex } from "../lib/cache";
 import { drain } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
@@ -42,11 +42,15 @@ export default function ClientScreen() {
     })();
   }, [params.id]);
 
-  // Kick off initial sync (last 30 convos) and drain outbox when online
+  // Kick off sync and keep retrying periodically until done; also drain outbox each attempt
   useEffect(() => {
     if (!url || !isOnline) return;
     let cancelled = false;
-    (async () => {
+    let running = false;
+
+    const attempt = async () => {
+      if (running) return;
+      running = true;
       try {
         logInfo('sync', 'maybeFullSync start');
         const res = await maybeFullSync(url);
@@ -61,14 +65,31 @@ export default function ClientScreen() {
         }
         logInfo('sync', 'maybeFullSync done');
       } catch {}
-      if (cancelled) return;
       try {
         logInfo('outbox', 'drain start');
-        const res = await drain(url);
-        logInfo('outbox', 'drain result', res);
+        const dres = await drain(url);
+        logInfo('outbox', 'drain result', dres);
       } catch {}
-    })();
-    return () => { cancelled = true; };
+      running = false;
+    };
+
+    // Immediate attempt
+    attempt();
+    // Retry every 5s until full sync done
+    const timer = setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const done = await isFullSyncDone(url);
+        if (done) {
+          logInfo('sync', 'fullSync already done, stopping retries');
+          clearInterval(timer);
+          return;
+        }
+      } catch {}
+      await attempt();
+    }, 5000);
+
+    return () => { cancelled = true; clearInterval(timer); };
   }, [url, isOnline]);
 
   if (!url) {
