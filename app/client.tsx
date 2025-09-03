@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Platform, SafeAreaView, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
+import { maybeFullSync } from "../lib/sync";
+import { drain } from "../lib/outbox";
 
 const STORAGE_KEY = "servers:list";
 
@@ -35,9 +38,21 @@ export default function ClientScreen() {
     })();
   }, [params.id]);
 
+  // Kick off initial sync (last 30 convos) and drain outbox when online
+  useEffect(() => {
+    if (!url || !isOnline) return;
+    let cancelled = false;
+    (async () => {
+      try { await maybeFullSync(url); } catch {}
+      if (cancelled) return;
+      try { await drain(url); } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [url, isOnline]);
+
   if (!url) {
     return (
-      <SafeAreaView style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+      <SafeAreaView style={{ flex: 1, alignItems: "center", justifyContent: "center" }} edges={["top", "bottom"]}>
         <ActivityIndicator />
         <Text style={{ marginTop: 8 }}>Loading…</Text>
       </SafeAreaView>
@@ -45,7 +60,7 @@ export default function ClientScreen() {
   }
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top", "bottom"]}>
       <View style={{ height: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
         <TouchableOpacity onPress={() => router.replace("/servers")}>
           <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Servers</Text>

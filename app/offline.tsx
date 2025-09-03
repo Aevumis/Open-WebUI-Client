@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { FlatList, SafeAreaView, Text, TouchableOpacity, View } from "react-native";
+import { FlatList, Text, TouchableOpacity, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
 
 export default function OfflineScreen() {
@@ -20,7 +21,7 @@ export default function OfflineScreen() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top", "bottom"]}>
       <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
         <Text style={{ fontSize: 18, fontWeight: "700" }}>Offline content</Text>
         <Text style={{ color: "#666" }}>Cached conversation JSON (text only)</Text>
