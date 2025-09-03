@@ -6,9 +6,9 @@ import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { cacheApiResponse, type CachedEntry } from "../lib/cache";
 import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems } from "../lib/outbox";
+import { debug as logDebug, info as logInfo } from "../lib/log";
 
-// Debug log-level switch for WebView debug messages
-const DEBUG_WEBVIEW_DEBUG_LOGS = typeof __DEV__ !== 'undefined' ? __DEV__ : true;
+// WebView debug logs are now gated via centralized logger scopes/levels
 
 function buildInjection(baseUrl: string) {
   // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
@@ -425,8 +425,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
   // Mount-time visibility
   React.useEffect(() => {
     try {
-      // eslint-disable-next-line no-console
-      console.log('[WebView] mount', { baseUrl });
+      logInfo('webview', 'mount', { baseUrl });
     } catch {}
   }, [baseUrl]);
 
@@ -437,8 +436,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       const items = await listOutbox(host);
       if (!items.length) { drainingRef.current = false; return; }
       const batch = items.slice(0, 3).map((it) => ({ id: it.id, chatId: it.chatId, body: it.body }));
-      // eslint-disable-next-line no-console
-      console.log('[webviewDrain] sending batch', { size: batch.length });
+      logInfo('webviewDrain', 'sending batch', { size: batch.length });
       const js = `(() => { (async function(){
         try {
           const items = ${JSON.stringify(batch)};
@@ -511,20 +509,12 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
     try {
       const msg = JSON.parse(e.nativeEvent.data || '{}');
       const host = new URL(baseUrl).host;
-      if (msg.type === 'debug') {
-        // Surface WebView injection debug events only when enabled
-        if (DEBUG_WEBVIEW_DEBUG_LOGS) {
-          // eslint-disable-next-line no-console
-          console.log('[WebView][debug]', msg);
-        }
-        return;
-      }
+      if (msg.type === 'debug') { logDebug('webview', 'debug', msg); return; }
       if (msg.type === 'drainBatchResult' && Array.isArray(msg.successIds)) {
         await removeOutboxItems(host, msg.successIds);
         const remaining = await count(host);
         const token = await getToken(host);
-        // eslint-disable-next-line no-console
-        console.log('[webviewDrain] batch result', { removed: msg.successIds.length, remaining });
+        logInfo('webviewDrain', 'batch result', { removed: msg.successIds.length, remaining });
         if (!token && remaining > 0) {
           await injectWebDrainBatch();
         } else {
@@ -533,23 +523,20 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
         return;
       }
       if (msg.type === 'drainBatchError') {
-        // eslint-disable-next-line no-console
-        console.log('[webviewDrain] batch error', { error: msg.error });
+        logInfo('webviewDrain', 'batch error', { error: msg.error });
         drainingRef.current = false;
         return;
       }
       if (msg.type === 'authToken' && typeof msg.token === 'string') {
         await setToken(host, msg.token);
-        // eslint-disable-next-line no-console
-        console.log('[outbox] token saved for host', host);
+        logInfo('outbox', 'token saved for host', { host });
         return;
       }
       if (msg.type === 'queueMessage' && msg.chatId && msg.body) {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
         const c = await count(host);
-        // eslint-disable-next-line no-console
-        console.log('[outbox] enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
+        logInfo('outbox', 'enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
         return;
       }
       if (msg.type === 'externalLink' && typeof msg.url === 'string') {
@@ -579,8 +566,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       }
     } catch (err) {
       try {
-        // eslint-disable-next-line no-console
-        console.log('[WebView][raw]', String(e?.nativeEvent?.data || ''));
+        logDebug('webview', 'raw', String(e?.nativeEvent?.data || ''));
       } catch {}
     }
   }, [baseUrl, injectWebDrainBatch]);
@@ -604,8 +590,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       const [c, token] = [await count(host), await getToken(host)];
       if (c > 0 && !token && !drainingRef.current) {
         drainingRef.current = true;
-        // eslint-disable-next-line no-console
-        console.log('[webviewDrain] start (no native token)', { host, pending: c });
+        logInfo('webviewDrain', 'start (no native token)', { host, pending: c });
         await injectWebDrainBatch();
       }
     })();
@@ -614,8 +599,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
   // One-shot manual injection attempt as a fallback
   React.useEffect(() => {
     try {
-      // eslint-disable-next-line no-console
-      console.log('[WebView] manual inject attempt');
+      logDebug('webview', 'manual inject attempt');
       webref.current?.injectJavaScript(`${injected};true;`);
     } catch {}
   }, [injected]);
@@ -656,8 +640,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
             WebBrowser.openBrowserAsync(req.url);
             return false;
           }
-          // eslint-disable-next-line no-console
-          console.log('[WebView] allow navigation', current.toString());
+          logDebug('webview', 'allow navigation', current.toString());
           return true;
         } catch {
           return true;
@@ -667,8 +650,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       injectedJavaScript={injected}
       onLoadEnd={() => {
         try {
-          // eslint-disable-next-line no-console
-          console.log('[WebView] onLoadEnd reinject');
+          logDebug('webview', 'onLoadEnd reinject');
           // Attempt plain reinject
           webref.current?.injectJavaScript(`${injected};true;`);
           // Probe the bridge explicitly
@@ -682,8 +664,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       }}
       onNavigationStateChange={(navState) => {
         try {
-          // eslint-disable-next-line no-console
-          console.log('[WebView] nav change', navState.url);
+          logDebug('webview', 'nav change', navState.url);
           webref.current?.injectJavaScript(`${injected};true;`);
           const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
           webref.current?.injectJavaScript(WRAP);
@@ -692,8 +673,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       }}
       onError={(syntheticEvent) => {
         try {
-          // eslint-disable-next-line no-console
-          console.log('[WebView] error', syntheticEvent.nativeEvent);
+          logInfo('webview', 'error', syntheticEvent.nativeEvent);
         } catch {}
       }}
       allowsBackForwardNavigationGestures

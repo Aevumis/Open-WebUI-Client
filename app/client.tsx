@@ -6,7 +6,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
 import { maybeFullSync } from "../lib/sync";
+import { getCacheIndex } from "../lib/cache";
 import { drain } from "../lib/outbox";
+import { debug as logDebug, info as logInfo } from "../lib/log";
 
 const STORAGE_KEY = "servers:list";
 
@@ -19,8 +21,7 @@ export default function ClientScreen() {
   useEffect(() => {
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
       const next = state.isInternetReachable ?? !!state.isConnected;
-      // eslint-disable-next-line no-console
-      console.log('[net] change', { isConnected: state.isConnected, isInternetReachable: state.isInternetReachable, effectiveOnline: next });
+      logDebug('net', 'change', { isConnected: state.isConnected, isInternetReachable: state.isInternetReachable, effectiveOnline: next });
       setIsOnline(next);
     });
     return () => sub();
@@ -47,19 +48,24 @@ export default function ClientScreen() {
     let cancelled = false;
     (async () => {
       try {
-        // eslint-disable-next-line no-console
-        console.log('[sync] maybeFullSync start');
-        await maybeFullSync(url);
-        // eslint-disable-next-line no-console
-        console.log('[sync] maybeFullSync done');
+        logInfo('sync', 'maybeFullSync start');
+        const res = await maybeFullSync(url);
+        if (res) {
+          logInfo('sync', 'fullSync result', res);
+          try {
+            const idx = await getCacheIndex();
+            const host = new URL(url).host;
+            const count = idx.filter(it => it.host === host).length;
+            logInfo('cache', 'index count for host', { host, count });
+          } catch {}
+        }
+        logInfo('sync', 'maybeFullSync done');
       } catch {}
       if (cancelled) return;
       try {
-        // eslint-disable-next-line no-console
-        console.log('[outbox] drain start');
+        logInfo('outbox', 'drain start');
         const res = await drain(url);
-        // eslint-disable-next-line no-console
-        console.log('[outbox] drain result', res);
+        logInfo('outbox', 'drain result', res);
       } catch {}
     })();
     return () => { cancelled = true; };
