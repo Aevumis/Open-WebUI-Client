@@ -114,5 +114,49 @@ This document tracks issues encountered and how they were fixed, to avoid regres
     - Repeated UI-simulated `buttonClick` followed by:
     - `completionDetected pathname:'/api/chat/completions'` and `completionOk`
     - `[webviewDrain] batch result { removed: 1, remaining: 0 }`
+  - Offline intercept duplicate UI suppression:
+    - Offline queue:
+      - `[WebView][debug] { type: 'debug', scope: 'rn', event: 'online', online: false }`
+      - `[WebView][debug] { scope: 'injection', event: 'offlineIntercepted', how: 'click', chatId: '…', len: 6 }`
+      - `[outbox] enqueued … count: 1`
+    - Reconnect + drain:
+      - `[WebView][debug] { scope: 'injection', event: 'browserNetwork', online: true }`
+      - `[net] change … effectiveOnline: true`
+      - `[webviewDrain] start (no native token) { pending: 1 }`
+      - `[webviewDrain] sending batch { size: 1 }`
+      - `[outbox][drain] no token, abort` (expected; proceed with WebView-assisted drain)
+      - `[WebView][debug] { scope: 'injection', event: 'buttonClick', online: true, len: 6 }`
+      - `[webviewDrain] batch result { removed: 0, remaining: 1 }` (timeout at ~8s)
+      - Retry: `sending batch` → `buttonClick`
+      - `completionDetected pathname:'/api/chat/completions'` → `completionOk`
+      - `[webviewDrain] batch result { removed: 1, remaining: 0 }`
 
 ---
+
+## 2025-09-03 – Offline send duplicate UI suppression (intercept at source)
+
+- Symptom (before):
+  - When offline, the site created an optimistic placeholder (user + blank assistant). On reconnect, our drain sent again, causing duplicate UI and potential cross-device duplicates.
+- Fix:
+  - Intercept Enter/button when offline in `components/OpenWebUIView.tsx` `buildInjection()`.
+  - Prevent default, capture text, `post({ type: 'queueMessage' })`, clear input, and log `offlineIntercepted`.
+  - Do not allow the site to create placeholders while offline.
+- Validation (logs):
+  - Offline queue:
+    - `[WebView][debug] { type: 'debug', scope: 'rn', event: 'online', online: false }`
+    - `[WebView][debug] { scope: 'injection', event: 'offlineIntercepted', how: 'click', chatId: '…', len: 6 }`
+    - `[outbox] enqueued … count: 1`
+  - Reconnect + drain:
+    - `[WebView][debug] { scope: 'injection', event: 'browserNetwork', online: true }`
+    - `[net] change … effectiveOnline: true`
+    - `[webviewDrain] start (no native token) { pending: 1 }`
+    - `[webviewDrain] sending batch { size: 1 }`
+    - `[outbox][drain] no token, abort` (expected; proceed with WebView-assisted drain)
+    - `[WebView][debug] { scope: 'injection', event: 'buttonClick', online: true, len: 6 }`
+    - `[webviewDrain] batch result { removed: 0, remaining: 1 }` (timeout at ~8s)
+    - Retry: `sending batch` → `buttonClick`
+    - `completionDetected pathname:'/api/chat/completions'` → `completionOk`
+    - `[webviewDrain] batch result { removed: 1, remaining: 0 }`
+- Notes:
+  - The first simulated click timed out (~8s) just before completion arrived; a second attempt succeeded ~200ms later. To reduce retries, consider increasing the wait window to 9–10s.
+  - No placeholder message appeared offline; only one message was delivered after reconnect.

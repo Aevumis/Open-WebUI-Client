@@ -68,6 +68,31 @@ function buildInjection(baseUrl: string) {
               var parts = (window.location.pathname || '').split('/').filter(Boolean);
               var idx = parts.indexOf('c');
               var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+              // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
+              var rnVal0 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+              var offline0 = (window.__owui_wasOffline === true) || (rnVal0 === false);
+              if (offline0 && !e.shiftKey) {
+                var textNow0 = '';
+                var node0 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+                if (node0) {
+                  if ('value' in node0) { textNow0 = (node0.value||'').trim(); }
+                  else { textNow0 = (node0.innerText || node0.textContent || '').trim(); }
+                }
+                try { window.__owui_lastTextCandidate = textNow0; } catch {}
+                if (textNow0 && cid) {
+                  post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'enter', chatId: cid, len: textNow0.length });
+                  post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow0 } });
+                  // Clear input to reflect queued state
+                  try {
+                    if (node0) {
+                      if ('value' in node0) { node0.value = ''; try { node0.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
+                      else { node0.innerText = ''; try { node0.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
+                    }
+                  } catch {}
+                }
+                try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
+                return;
+              }
               var startTick = Date.now();
               // capture candidate text immediately
               var textNow = '';
@@ -103,6 +128,31 @@ function buildInjection(baseUrl: string) {
             var parts = (window.location.pathname || '').split('/').filter(Boolean);
             var idx = parts.indexOf('c');
             var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+            // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
+            var rnVal1 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+            var offline1 = (window.__owui_wasOffline === true) || (rnVal1 === false);
+            if (offline1) {
+              var textNow1 = '';
+              var node1 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+              if (node1) {
+                if ('value' in node1) { textNow1 = (node1.value||'').trim(); }
+                else { textNow1 = (node1.innerText || node1.textContent || '').trim(); }
+              }
+              try { window.__owui_lastTextCandidate = textNow1; } catch {}
+              if (textNow1 && cid) {
+                post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'click', chatId: cid, len: textNow1.length });
+                post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow1 } });
+                // Clear input to reflect queued state
+                try {
+                  if (node1) {
+                    if ('value' in node1) { node1.value = ''; try { node1.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
+                    else { node1.innerText = ''; try { node1.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
+                  }
+                } catch {}
+              }
+              try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
+              return;
+            }
             var startTick = Date.now();
             // capture candidate text immediately
             var textNow = '';
