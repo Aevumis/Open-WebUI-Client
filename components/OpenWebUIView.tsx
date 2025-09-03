@@ -602,8 +602,11 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
         try {
           if ((msg.event === 'injected' || msg.event === 'hasInjected') && !syncingRef.current) {
             const tok = await getToken(host);
-            if (!tok) {
+            const settings = await getSettings(host);
+            if (!tok && settings.fullSyncOnLoad) {
               await injectWebSync();
+            } else if (!settings.fullSyncOnLoad) {
+              logInfo('sync', 'fullSyncOnLoad disabled, skip webview-assisted sync');
             }
           }
         } catch {}

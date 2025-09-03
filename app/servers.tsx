@@ -3,6 +3,7 @@ import { Alert, FlatList, KeyboardAvoidingView, Platform, Text, TextInput, Touch
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Link, router } from "expo-router";
+import { getSettings, setSettings, type ServerSettings } from "../lib/outbox";
 
 const STORAGE_KEY = "servers:list";
 const ACTIVE_KEY = "servers:active";
@@ -52,6 +53,10 @@ export default function ServersScreen() {
   const [active, setLocalActive] = useState<string | null>(null);
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
+  const [openSettingsFor, setOpenSettingsFor] = useState<string | null>(null);
+  const [formLimit, setFormLimit] = useState<string>("30");
+  const [formRps, setFormRps] = useState<string>("5");
+  const [formFullSync, setFormFullSync] = useState<boolean>(true);
 
   useEffect(() => {
     (async () => {
@@ -88,6 +93,35 @@ export default function ServersScreen() {
   const activate = async (id: string) => {
     await setActive(id);
     setLocalActive(id);
+  };
+
+  const openSettings = async (item: ServerItem) => {
+    try {
+      const host = new URL(item.url).host;
+      const s: ServerSettings = await getSettings(host);
+      setFormLimit(String(s.limitConversations));
+      setFormRps(String(s.rps));
+      setFormFullSync(!!s.fullSyncOnLoad);
+      setOpenSettingsFor(item.id);
+    } catch {
+      setFormLimit("30");
+      setFormRps("5");
+      setFormFullSync(true);
+      setOpenSettingsFor(item.id);
+    }
+  };
+
+  const saveSettings = async (item: ServerItem) => {
+    try {
+      const host = new URL(item.url).host;
+      const limit = Math.max(1, Math.min(500, Number.parseInt(formLimit || "30", 10) || 30));
+      const rps = Math.max(1, Math.min(50, Number.parseInt(formRps || "5", 10) || 5));
+      await setSettings(host, { limitConversations: limit, rps, fullSyncOnLoad: formFullSync });
+      Alert.alert("Saved", "Server settings updated.");
+      setOpenSettingsFor(null);
+    } catch (e: any) {
+      Alert.alert("Error", String(e?.message || e || "Failed to save settings"));
+    }
   };
 
   const proceed = () => {
@@ -131,17 +165,61 @@ export default function ServersScreen() {
             data={servers}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
-              <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10, gap: 8 }}>
-                <TouchableOpacity onPress={() => activate(item.id)} style={{ width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: "#111", alignItems: "center", justifyContent: "center" }}>
-                  {active === item.id ? <View style={{ width: 12, height: 12, backgroundColor: "#111", borderRadius: 6 }} /> : null}
-                </TouchableOpacity>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "600" }}>{item.label || item.url}</Text>
-                  {item.label ? <Text style={{ color: "#666", fontSize: 12 }}>{item.url}</Text> : null}
+              <View style={{ paddingVertical: 10 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <TouchableOpacity onPress={() => activate(item.id)} style={{ width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: "#111", alignItems: "center", justifyContent: "center" }}>
+                    {active === item.id ? <View style={{ width: 12, height: 12, backgroundColor: "#111", borderRadius: 6 }} /> : null}
+                  </TouchableOpacity>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontWeight: "600" }}>{item.label || item.url}</Text>
+                    {item.label ? <Text style={{ color: "#666", fontSize: 12 }}>{item.url}</Text> : null}
+                  </View>
+                  <TouchableOpacity onPress={() => openSettings(item)}>
+                    <Text style={{ color: "#0a7ea4", fontWeight: "600" }}>Settings</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => remove(item.id)}>
+                    <Text style={{ color: "#c00", fontWeight: "600" }}>Remove</Text>
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity onPress={() => remove(item.id)}>
-                  <Text style={{ color: "#c00", fontWeight: "600" }}>Remove</Text>
-                </TouchableOpacity>
+                {openSettingsFor === item.id ? (
+                  <View style={{ marginTop: 10, padding: 12, borderWidth: 1, borderColor: "#eee", borderRadius: 8, gap: 8 }}>
+                    <Text style={{ fontWeight: "600", marginBottom: 4 }}>Server Settings</Text>
+                    <View style={{ gap: 6 }}>
+                      <Text style={{ color: "#666" }}>Conversation limit</Text>
+                      <TextInput
+                        placeholder="30"
+                        keyboardType="number-pad"
+                        value={formLimit}
+                        onChangeText={setFormLimit}
+                        style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10 }}
+                      />
+                    </View>
+                    <View style={{ gap: 6 }}>
+                      <Text style={{ color: "#666" }}>Rate limit (requests/second)</Text>
+                      <TextInput
+                        placeholder="5"
+                        keyboardType="number-pad"
+                        value={formRps}
+                        onChangeText={setFormRps}
+                        style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10 }}
+                      />
+                    </View>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+                      <Text style={{ color: "#666" }}>Full sync on app load</Text>
+                      <TouchableOpacity onPress={() => setFormFullSync(v => !v)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: formFullSync ? "#0a7ea4" : "#ddd", borderRadius: 14 }}>
+                        <Text style={{ color: formFullSync ? "#0a7ea4" : "#333", fontWeight: "600" }}>{formFullSync ? 'On' : 'Off'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
+                      <TouchableOpacity onPress={() => saveSettings(item)} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8, alignItems: "center" }}>
+                        <Text style={{ color: "#fff", fontWeight: "600" }}>Save</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => setOpenSettingsFor(null)} style={{ padding: 12, borderRadius: 8, alignItems: "center", borderWidth: 1, borderColor: "#ddd" }}>
+                        <Text style={{ color: "#111", fontWeight: "600" }}>Cancel</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : null}
               </View>
             )}
             ListEmptyComponent={<Text style={{ color: "#666" }}>No servers added yet.</Text>}

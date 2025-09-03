@@ -17,14 +17,20 @@ const SETTINGS_KEY = (host: string) => `server:settings:${host}`;
 export type ServerSettings = {
   limitConversations: number; // default 30
   rps: number; // default 5
+  fullSyncOnLoad: boolean; // default true
 };
 
 export async function getSettings(host: string): Promise<ServerSettings> {
+  const defaults: ServerSettings = { limitConversations: 30, rps: 5, fullSyncOnLoad: true };
   try {
     const raw = await AsyncStorage.getItem(SETTINGS_KEY(host));
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Merge with defaults to remain compatible with older stored values
+      return { ...defaults, ...parsed } as ServerSettings;
+    }
   } catch {}
-  return { limitConversations: 30, rps: 5 };
+  return defaults;
 }
 
 export async function setSettings(host: string, settings: Partial<ServerSettings>) {

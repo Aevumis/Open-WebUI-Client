@@ -7,7 +7,7 @@ import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
 import { maybeFullSync, isFullSyncDone } from "../lib/sync";
 import { getCacheIndex } from "../lib/cache";
-import { drain } from "../lib/outbox";
+import { drain, getSettings } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
 
 const STORAGE_KEY = "servers:list";
@@ -52,18 +52,23 @@ export default function ClientScreen() {
       if (running) return;
       running = true;
       try {
-        logInfo('sync', 'maybeFullSync start');
-        const res = await maybeFullSync(url);
-        if (res) {
-          logInfo('sync', 'fullSync result', res);
-          try {
-            const idx = await getCacheIndex();
-            const host = new URL(url).host;
-            const count = idx.filter(it => it.host === host).length;
-            logInfo('cache', 'index count for host', { host, count });
-          } catch {}
+        const host = new URL(url).host;
+        const settings = await getSettings(host);
+        if (settings.fullSyncOnLoad) {
+          logInfo('sync', 'maybeFullSync start');
+          const res = await maybeFullSync(url);
+          if (res) {
+            logInfo('sync', 'fullSync result', res);
+            try {
+              const idx = await getCacheIndex();
+              const count = idx.filter(it => it.host === host).length;
+              logInfo('cache', 'index count for host', { host, count });
+            } catch {}
+          }
+          logInfo('sync', 'maybeFullSync done');
+        } else {
+          logInfo('sync', 'fullSyncOnLoad disabled, skip maybeFullSync');
         }
-        logInfo('sync', 'maybeFullSync done');
       } catch {}
       try {
         logInfo('outbox', 'drain start');
@@ -79,6 +84,13 @@ export default function ClientScreen() {
     const timer = setInterval(async () => {
       if (cancelled) return;
       try {
+        const host = new URL(url).host;
+        const settings = await getSettings(host);
+        if (!settings.fullSyncOnLoad) {
+          logInfo('sync', 'fullSyncOnLoad disabled, stop retries');
+          clearInterval(timer);
+          return;
+        }
         const done = await isFullSyncDone(url);
         if (done) {
           logInfo('sync', 'fullSync already done, stopping retries');
