@@ -5,14 +5,145 @@ import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { cacheApiResponse, type CachedEntry } from "../lib/cache";
+import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems } from "../lib/outbox";
+
+// Debug log-level switch for WebView debug messages
+const DEBUG_WEBVIEW_DEBUG_LOGS = typeof __DEV__ !== 'undefined' ? __DEV__ : true;
 
 function buildInjection(baseUrl: string) {
   // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
   // Post messages to React Native with type keys for native handling.
   const allowedHost = JSON.stringify(new URL(baseUrl).host);
   return `(() => {
-    const RN = window.ReactNativeWebView;
+    try {
+      if (window.__owui_injected) {
+        try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'debug', scope: 'injection', event: 'alreadyInjected' })); } catch (_) {}
+        return;
+      }
+      window.__owui_injected = true;
+    } catch (_) {}
     const host = ${allowedHost};
+    let sentAuth = false;
+    // offline + completion tracking
+    window.__owui_wasOffline = false;
+    window.__owui_lastCompletionTick = 0;
+
+    try { (window.ReactNativeWebView||{}).postMessage && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'debug', scope: 'injection', event: 'hostInfo', hostExpected: host, hostActual: window.location.host })); } catch {}
+
+    function post(msg) {
+      try {
+        var RN = (window && window.ReactNativeWebView) ? window.ReactNativeWebView : null;
+        if (RN && RN.postMessage) RN.postMessage(JSON.stringify(msg));
+      } catch (_) {}
+    }
+
+    // Early boot marker and error hooks
+    try { post({ type: 'debug', scope: 'injection', event: 'boot' }); } catch {}
+    try {
+      window.addEventListener('error', function(e) {
+        try { post({ type: 'debug', scope: 'injection', event: 'error', message: String((e && e.message) || (e && e.error) || 'unknown') }); } catch {}
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        try { post({ type: 'debug', scope: 'injection', event: 'unhandledrejection', reason: String(e && (e.reason && e.reason.message) || e && e.reason || 'unknown') }); } catch {}
+      });
+      // Patch navigator.onLine early so apps that gate on it still attempt fetch when device is offline
+      try {
+        var nproto = Object.getPrototypeOf(navigator);
+        var desc = Object.getOwnPropertyDescriptor(nproto, 'onLine');
+        if (desc && desc.configurable && !nproto.__owui_onLine_patched) {
+          Object.defineProperty(nproto, 'onLine', { configurable: true, get: function(){ return true; } });
+          nproto.__owui_onLine_patched = true;
+          post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatchedEarly', ok: true });
+        }
+      } catch (epe) { try { post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatchedEarly', ok: false, message: String(epe && epe.message || epe) }); } catch(_){} }
+      // Browser network state visibility
+      window.addEventListener('online', function(){ try { window.__owui_wasOffline = false; post({ type: 'debug', scope: 'injection', event: 'browserNetwork', online: true }); } catch {} });
+      window.addEventListener('offline', function(){ try { window.__owui_wasOffline = true; post({ type: 'debug', scope: 'injection', event: 'browserNetwork', online: false }); } catch {} });
+      // User interaction hints while offline test
+      document.addEventListener('keydown', function(e){
+        try {
+          if (e && (e.key === 'Enter' || e.keyCode === 13)) {
+            var tag = (e.target && e.target.tagName || '').toLowerCase();
+            if (tag === 'textarea' || tag === 'input') {
+              var parts = (window.location.pathname || '').split('/').filter(Boolean);
+              var idx = parts.indexOf('c');
+              var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+              var startTick = Date.now();
+              // capture candidate text immediately
+              var textNow = '';
+              var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+              if (node) {
+                if ('value' in node) { textNow = (node.value||'').trim(); }
+                else { textNow = (node.innerText || node.textContent || '').trim(); }
+              }
+              try { window.__owui_lastTextCandidate = textNow; } catch {}
+              post({ type: 'debug', scope: 'injection', event: 'composeEnter', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
+              // Fallback: if offline and no completion fetch follows shortly, queue from DOM
+              setTimeout(function(){
+                try {
+                  var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+                  var offline = (window.__owui_wasOffline === true) || (rnVal === false);
+                  if (!offline) return;
+                  if ((window.__owui_lastCompletionTick||0) > startTick) return;
+                  var text = String(window.__owui_lastTextCandidate||'').trim();
+                  if (text && cid) {
+                    post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
+                    post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
+                  }
+                } catch {}
+              }, 1200);
+            }
+          }
+        } catch {}
+      }, true);
+      document.addEventListener('click', function(e){
+        try {
+          var btn = e && e.target && (e.target.closest ? e.target.closest('button,[role="button"]') : null);
+          if (btn) {
+            var parts = (window.location.pathname || '').split('/').filter(Boolean);
+            var idx = parts.indexOf('c');
+            var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+            var startTick = Date.now();
+            // capture candidate text immediately
+            var textNow = '';
+            var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+            if (node) {
+              if ('value' in node) { textNow = (node.value||'').trim(); }
+              else { textNow = (node.innerText || node.textContent || '').trim(); }
+            }
+            try { window.__owui_lastTextCandidate = textNow; } catch {}
+            post({ type: 'debug', scope: 'injection', event: 'buttonClick', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
+            // Fallback: if offline and no completion fetch follows shortly, queue from DOM
+            setTimeout(function(){
+              try {
+                var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+                var offline = (window.__owui_wasOffline === true) || (rnVal === false);
+                if (!offline) return;
+                if ((window.__owui_lastCompletionTick||0) > startTick) return;
+                var text = String(window.__owui_lastTextCandidate||'').trim();
+                if (text && cid) {
+                  post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
+                  post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
+                }
+              } catch {}
+            }, 1200);
+          }
+        } catch {}
+      }, true);
+    } catch {}
+
+    function getCookie(name) {
+      try {
+        const m = (document.cookie || '').match(new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()\[\]\\\/\+^])/g, '\\$1') + '=([^;]*)'));
+        return m ? decodeURIComponent(m[1]) : null;
+      } catch (_) { return null; }
+    }
+
+    function checkAuthOnce() {
+      if (sentAuth) return;
+      const t = getCookie('token') || getCookie('authjs.session-token');
+      if (t) { sentAuth = true; post({ type: 'authToken', token: t }); post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' }); }
+    }
 
     // Register Service Worker for offline shell + API cache (served at origin /sw.js)
     if ('serviceWorker' in navigator) {
@@ -39,16 +170,128 @@ function buildInjection(baseUrl: string) {
       });
     }
 
+    checkAuthOnce();
+    const authPoll = setInterval(checkAuthOnce, 3000);
+    try { post({ type: 'debug', scope: 'injection', event: 'injected' }); } catch {}
+
+    // Capture Authorization from XMLHttpRequest as well (e.g., axios)
+    try {
+      const XHR = window.XMLHttpRequest;
+      if (XHR && XHR.prototype && !XHR.prototype.__owui_patched) {
+        const origSetHeader = XHR.prototype.setRequestHeader;
+        XHR.prototype.setRequestHeader = function(name, value) {
+          try {
+            if (!sentAuth && /authorization/i.test(String(name))) {
+              const m = String(value).match(/Bearer\s+(.+)/i);
+              if (m && m[1]) { sentAuth = true; post({ type: 'authToken', token: m[1] }); post({ type: 'debug', scope: 'injection', event: 'authXHRHeaderCaptured' }); }
+            }
+          } catch {}
+          return origSetHeader.apply(this, arguments);
+        };
+        // mark patched
+        XHR.prototype.__owui_patched = true;
+      }
+    } catch {}
+
     const origFetch = window.fetch;
     window.fetch = async function(input, init) {
-      const res = await origFetch(input, init);
+      try {
+        // Force sites that gate on navigator.onLine to attempt fetch even when offline.
+        // This enables our network-failure path below to queue the message body.
+        try {
+          var proto = Object.getPrototypeOf(navigator);
+          var d = Object.getOwnPropertyDescriptor(proto, 'onLine');
+          if (d && d.configurable && !proto.__owui_onLine_patched) {
+            Object.defineProperty(proto, 'onLine', { configurable: true, get: function(){ return true; } });
+            proto.__owui_onLine_patched = true;
+            post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatched', ok: true });
+          }
+        } catch (pe) { try { post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatched', ok: false, message: String(pe && pe.message || pe) }); } catch(_){} }
+
+        // Attempt to capture Authorization header or cookie token before request
+        const hh = new Headers((init && init.headers) || {});
+        const ah = hh.get('authorization') || hh.get('Authorization');
+        if (ah && !sentAuth) {
+          const m = ah.match(/Bearer\s+(.+)/i);
+          if (m && m[1]) { sentAuth = true; post({ type: 'authToken', token: m[1] }); post({ type: 'debug', scope: 'injection', event: 'authHeaderCaptured' }); }
+        } else if (!sentAuth) {
+          checkAuthOnce();
+        }
+      } catch (_) {}
+
+      // If this is a chat completion POST, optionally queue when offline
+      let targetUrl = typeof input === 'string' ? input : (input && input.url);
+      const isCompletion = (() => {
+        try {
+          const u = new URL(targetUrl, window.location.href);
+          const p = u.pathname;
+          return (p === '/api/chat/completions' || p === '/api/v1/chat/completions') && u.host === host;
+        } catch { return false; }
+      })();
+
+      if (isCompletion) {
+        try {
+          try {
+            const u = new URL(targetUrl, window.location.href);
+            post({ type: 'debug', scope: 'injection', event: 'completionDetected', pathname: u.pathname, online: !!navigator.onLine });
+          } catch {}
+          const bodyRaw = init && init.body;
+          let bodyParsed = null;
+          if (typeof bodyRaw === 'string') {
+            try { bodyParsed = JSON.parse(bodyRaw); } catch {}
+          }
+          // Derive chatId from URL path /c/:id if present
+          let chatId = null;
+          try {
+            const parts = (window.location.pathname || '').split('/').filter(Boolean);
+            const i = parts.indexOf('c');
+            if (i >= 0 && parts[i+1]) chatId = parts[i+1];
+          } catch {}
+          if (!navigator.onLine && bodyParsed && chatId) {
+            try { post({ type: 'debug', scope: 'injection', event: 'queueCandidate', chatId, bodyKeys: Object.keys(bodyParsed || {}), online: !!navigator.onLine }); } catch {}
+            post({ type: 'queueMessage', chatId, body: bodyParsed });
+          }
+        } catch (_) {}
+      }
+
+      let res;
+      try {
+        res = await origFetch(input, init);
+      } catch (err) {
+        // Network failure: try queueing
+        if (isCompletion) {
+          try {
+            const bodyRaw = init && init.body;
+            let bodyParsed = null;
+            if (typeof bodyRaw === 'string') { try { bodyParsed = JSON.parse(bodyRaw); } catch {} }
+            let chatId = null;
+            try {
+              const parts = (window.location.pathname || '').split('/').filter(Boolean);
+              const i = parts.indexOf('c');
+              if (i >= 0 && parts[i+1]) chatId = parts[i+1];
+            } catch {}
+            if (bodyParsed && chatId) {
+              try { post({ type: 'debug', scope: 'injection', event: 'queueOnError', chatId, bodyKeys: Object.keys(bodyParsed || {}), error: String(err && err.message || err) }); } catch {}
+              post({ type: 'queueMessage', chatId, body: bodyParsed });
+            }
+          } catch {}
+        }
+        throw err;
+      }
+      // Mark success tick for completion sends
+      try {
+        if (isCompletion && res && res.ok) {
+          window.__owui_lastCompletionTick = Date.now();
+          post({ type: 'debug', scope: 'injection', event: 'completionOk' });
+        }
+      } catch (_) {}
       try {
         const url = typeof input === 'string' ? input : input.url;
         const ct = res.headers.get('content-type') || '';
         if (ct.includes('application/json') && shouldCache(url)) {
           const clone = res.clone();
           const data = await clone.json();
-          RN.postMessage(JSON.stringify({ type: 'cacheResponse', url, data }));
+          post({ type: 'cacheResponse', url, data });
         } else if ((ct.includes('application/octet-stream') || ct.includes('application/pdf') || ct.includes('image/') || ct.includes('zip') || ct.includes('ms-') || ct.includes('officedocument')) && url) {
           // Likely a download; attempt to capture
           const disp = res.headers.get('content-disposition') || '';
@@ -58,7 +301,7 @@ function buildInjection(baseUrl: string) {
             const b64 = await readBlobAsBase64(blob);
             const nameMatch = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disp);
             const filename = decodeURIComponent(nameMatch?.[1] || nameMatch?.[2] || 'download');
-            RN.postMessage(JSON.stringify({ type: 'downloadBlob', filename, mime: ct, base64: b64 }));
+            post({ type: 'downloadBlob', filename, mime: ct, base64: b64 });
           }
         }
       } catch (e) {}
@@ -67,7 +310,7 @@ function buildInjection(baseUrl: string) {
 
     const origOpen = window.open;
     window.open = function(url, target, features) {
-      RN.postMessage(JSON.stringify({ type: 'externalLink', url }));
+      try { post({ type: 'externalLink', url }); } catch {}
       return null;
     };
 
@@ -80,7 +323,7 @@ function buildInjection(baseUrl: string) {
         const u = new URL(href, window.location.href);
         if (u.origin !== window.location.origin) {
           e.preventDefault();
-          RN.postMessage(JSON.stringify({ type: 'externalLink', url: u.toString() }));
+          post({ type: 'externalLink', url: u.toString() });
         }
       } catch {}
     }, true);
@@ -90,10 +333,140 @@ function buildInjection(baseUrl: string) {
 
 export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; online: boolean }) {
   const webref = useRef<WebView>(null);
+  const drainingRef = React.useRef(false);
+  const baseUrlRef = React.useRef(baseUrl);
+  React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
+
+  // Mount-time visibility
+  React.useEffect(() => {
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[WebView] mount', { baseUrl });
+    } catch {}
+  }, [baseUrl]);
+
+  // Inject one batch of webview-assisted drain using page cookies (fallback when no native token)
+  const injectWebDrainBatch = useCallback(async () => {
+    try {
+      const host = new URL(baseUrlRef.current).host;
+      const items = await listOutbox(host);
+      if (!items.length) { drainingRef.current = false; return; }
+      const batch = items.slice(0, 3).map((it) => ({ id: it.id, chatId: it.chatId, body: it.body }));
+      // eslint-disable-next-line no-console
+      console.log('[webviewDrain] sending batch', { size: batch.length });
+      const js = `(() => { (async function(){
+        try {
+          const items = ${JSON.stringify(batch)};
+          const okIds = [];
+          for (let it of items) {
+            try {
+              if (it && it.body && it.body.uiText) {
+                // UI-driven send using page cookies and app JS
+                const before = (window.__owui_lastCompletionTick||0);
+                // Insert text into input
+                let text = String(it.body.uiText||'');
+                let ta = document.querySelector('textarea');
+                if (ta) {
+                  ta.value = text;
+                  try { ta.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+                } else {
+                  let ce = document.querySelector('[contenteditable="true"]');
+                  if (ce) {
+                    ce.innerText = text;
+                    try { ce.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch {}
+                  }
+                }
+                // Click send button heuristics
+                let clicked = false;
+                let btn = document.querySelector('button[type="submit"], button[data-testid*="send" i]');
+                if (!btn) {
+                  const buttons = Array.from(document.querySelectorAll('button'));
+                  btn = buttons.find(b => /send/i.test(b.textContent||'')) || buttons[buttons.length-1];
+                }
+                if (btn) {
+                  try { btn.click(); clicked = true; } catch {}
+                }
+                // Wait up to 8s for completion fetch success tick
+                let ok = false;
+                for (let i=0;i<32;i++) {
+                  await new Promise(r=>setTimeout(r,250));
+                  if ((window.__owui_lastCompletionTick||0) > before) { ok = true; break; }
+                }
+                if (clicked && ok) {
+                  okIds.push(it.id);
+                } else {
+                  break;
+                }
+              } else {
+                const res = await fetch('/api/chat/completions', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json', 'referer': '/c/' + it.chatId },
+                  body: JSON.stringify(it.body)
+                });
+                if (res && res.ok) {
+                  okIds.push(it.id);
+                } else {
+                  break;
+                }
+              }
+            } catch (e) {
+              break;
+            }
+          }
+          window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'drainBatchResult', successIds: okIds }));
+        } catch (e) {
+          try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'drainBatchError', error: String(e && e.message || e) })); } catch (_) {}
+        }
+      })(); })();`;
+      webref.current?.injectJavaScript(js);
+    } catch {}
+  }, []);
 
   const onMessage = useCallback(async (e: WebViewMessageEvent) => {
     try {
       const msg = JSON.parse(e.nativeEvent.data || '{}');
+      const host = new URL(baseUrl).host;
+      if (msg.type === 'debug') {
+        // Surface WebView injection debug events only when enabled
+        if (DEBUG_WEBVIEW_DEBUG_LOGS) {
+          // eslint-disable-next-line no-console
+          console.log('[WebView][debug]', msg);
+        }
+        return;
+      }
+      if (msg.type === 'drainBatchResult' && Array.isArray(msg.successIds)) {
+        await removeOutboxItems(host, msg.successIds);
+        const remaining = await count(host);
+        const token = await getToken(host);
+        // eslint-disable-next-line no-console
+        console.log('[webviewDrain] batch result', { removed: msg.successIds.length, remaining });
+        if (!token && remaining > 0) {
+          await injectWebDrainBatch();
+        } else {
+          drainingRef.current = false;
+        }
+        return;
+      }
+      if (msg.type === 'drainBatchError') {
+        // eslint-disable-next-line no-console
+        console.log('[webviewDrain] batch error', { error: msg.error });
+        drainingRef.current = false;
+        return;
+      }
+      if (msg.type === 'authToken' && typeof msg.token === 'string') {
+        await setToken(host, msg.token);
+        // eslint-disable-next-line no-console
+        console.log('[outbox] token saved for host', host);
+        return;
+      }
+      if (msg.type === 'queueMessage' && msg.chatId && msg.body) {
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
+        const c = await count(host);
+        // eslint-disable-next-line no-console
+        console.log('[outbox] enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
+        return;
+      }
       if (msg.type === 'externalLink' && typeof msg.url === 'string') {
         await WebBrowser.openBrowserAsync(msg.url);
         return;
@@ -104,7 +477,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
           capturedAt: Date.now(),
           data: msg.data,
         };
-        await cacheApiResponse(new URL(baseUrl).host, entry);
+        await cacheApiResponse(host, entry);
         return;
       }
       if (msg.type === 'downloadBlob' && msg.base64) {
@@ -120,11 +493,47 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
         return;
       }
     } catch (err) {
-      // ignore
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[WebView][raw]', String(e?.nativeEvent?.data || ''));
+      } catch {}
     }
-  }, [baseUrl]);
+  }, [baseUrl, injectWebDrainBatch]);
 
   const injected = useMemo(() => buildInjection(baseUrl), [baseUrl]);
+
+  // Keep page aware of RN connectivity so DOM fallback can enqueue when RN says offline
+  React.useEffect(() => {
+    try {
+      const val = online ? 'true' : 'false';
+      const js = `(function(){try{ window.__owui_rnOnline = ${online ? 'true' : 'false'}; if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){ window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'rn',event:'online',online:${online ? 'true' : 'false'}})); } }catch(_){}})();`;
+      webref.current?.injectJavaScript(js);
+    } catch {}
+  }, [online]);
+
+  // On becoming online: if no native token but outbox has items, start webview-assisted drain
+  React.useEffect(() => {
+    (async () => {
+      if (!online) return;
+      const host = new URL(baseUrl).host;
+      const [c, token] = [await count(host), await getToken(host)];
+      if (c > 0 && !token && !drainingRef.current) {
+        drainingRef.current = true;
+        // eslint-disable-next-line no-console
+        console.log('[webviewDrain] start (no native token)', { host, pending: c });
+        await injectWebDrainBatch();
+      }
+    })();
+  }, [online, baseUrl, injectWebDrainBatch]);
+
+  // One-shot manual injection attempt as a fallback
+  React.useEffect(() => {
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[WebView] manual inject attempt');
+      webref.current?.injectJavaScript(`${injected};true;`);
+    } catch {}
+  }, [injected]);
 
   return (
     <WebView
@@ -162,12 +571,46 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
             WebBrowser.openBrowserAsync(req.url);
             return false;
           }
+          // eslint-disable-next-line no-console
+          console.log('[WebView] allow navigation', current.toString());
           return true;
         } catch {
           return true;
         }
       }}
       injectedJavaScriptBeforeContentLoaded={injected}
+      injectedJavaScript={injected}
+      onLoadEnd={() => {
+        try {
+          // eslint-disable-next-line no-console
+          console.log('[WebView] onLoadEnd reinject');
+          // Attempt plain reinject
+          webref.current?.injectJavaScript(`${injected};true;`);
+          // Probe the bridge explicitly
+          webref.current?.injectJavaScript(`(function(){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage('{"type":"debug","scope":"probe","event":"ping"}')}catch(e){}})();`);
+          // Safe-eval wrapper to catch syntax/runtime errors of the injected bundle
+          const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
+          webref.current?.injectJavaScript(WRAP);
+          // Report whether our guard flag is set in page context
+          webref.current?.injectJavaScript(`(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`);
+        } catch {}
+      }}
+      onNavigationStateChange={(navState) => {
+        try {
+          // eslint-disable-next-line no-console
+          console.log('[WebView] nav change', navState.url);
+          webref.current?.injectJavaScript(`${injected};true;`);
+          const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
+          webref.current?.injectJavaScript(WRAP);
+          webref.current?.injectJavaScript(`(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`);
+        } catch {}
+      }}
+      onError={(syntheticEvent) => {
+        try {
+          // eslint-disable-next-line no-console
+          console.log('[WebView] error', syntheticEvent.nativeEvent);
+        } catch {}
+      }}
       allowsBackForwardNavigationGestures
       startInLoadingState
     />

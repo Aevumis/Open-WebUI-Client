@@ -18,7 +18,10 @@ export default function ClientScreen() {
 
   useEffect(() => {
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
-      setIsOnline(state.isInternetReachable ?? !!state.isConnected);
+      const next = state.isInternetReachable ?? !!state.isConnected;
+      // eslint-disable-next-line no-console
+      console.log('[net] change', { isConnected: state.isConnected, isInternetReachable: state.isInternetReachable, effectiveOnline: next });
+      setIsOnline(next);
     });
     return () => sub();
   }, []);
@@ -43,9 +46,21 @@ export default function ClientScreen() {
     if (!url || !isOnline) return;
     let cancelled = false;
     (async () => {
-      try { await maybeFullSync(url); } catch {}
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[sync] maybeFullSync start');
+        await maybeFullSync(url);
+        // eslint-disable-next-line no-console
+        console.log('[sync] maybeFullSync done');
+      } catch {}
       if (cancelled) return;
-      try { await drain(url); } catch {}
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[outbox] drain start');
+        const res = await drain(url);
+        // eslint-disable-next-line no-console
+        console.log('[outbox] drain result', res);
+      } catch {}
     })();
     return () => { cancelled = true; };
   }, [url, isOnline]);

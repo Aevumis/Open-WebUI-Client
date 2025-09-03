@@ -22,6 +22,7 @@ The Expo app registers `sw.js` automatically via the injected script in `compone
 Required headers on `/sw.js` response:
 - `Service-Worker-Allowed: /`
 - `Cache-Control: no-cache`
+- Optional diagnostic header: `X-SW-Served-By: sidecar`
 
 ---
 
@@ -46,28 +47,63 @@ services:
     command: ["caddy", "file-server", "--root", "/srv", "--listen", ":8080"]
     volumes:
       - /opt/openwebui-sw:/srv:ro
-    deploy:
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.openwebui-sw.rule=Host(`openai.ayushpalak.com`) && (Path(`/sw.js`) || Path(`/offline.html`))"
-        - "traefik.http.routers.openwebui-sw.entrypoints=websecure"
-        - "traefik.http.routers.openwebui-sw.tls.certresolver=letsencrypt"
-        - "traefik.http.services.openwebui-sw.loadbalancer.server.port=8080"
-        - "traefik.http.routers.openwebui-sw.middlewares=openwebui-sw-headers"
-        - "traefik.http.middlewares.openwebui-sw-headers.headers.customresponseheaders.Service-Worker-Allowed=/"
-        - "traefik.http.middlewares.openwebui-sw-headers.headers.customresponseheaders.Cache-Control=no-cache"
     networks:
       - traefik-proxy
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.server_type == productivity
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=traefik-proxy"
+
+        # /sw.js (HTTP)
+        - "traefik.http.routers.openwebui-swjs.rule=Host(`openai.ayushpalak.com`) && Path(`/sw.js`)"
+        - "traefik.http.routers.openwebui-swjs.entrypoints=web"
+        - "traefik.http.routers.openwebui-swjs.priority=1000"
+        - "traefik.http.routers.openwebui-swjs.service=openwebui-sw"
+
+        # /sw.js (HTTPS)
+        - "traefik.http.routers.openwebui-swjs-https.rule=Host(`openai.ayushpalak.com`) && Path(`/sw.js`)"
+        - "traefik.http.routers.openwebui-swjs-https.entrypoints=websecure"
+        - "traefik.http.routers.openwebui-swjs-https.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.openwebui-swjs-https.priority=1000"
+        - "traefik.http.routers.openwebui-swjs-https.service=openwebui-sw"
+
+        # /offline.html (HTTP)
+        - "traefik.http.routers.openwebui-offline.rule=Host(`openai.ayushpalak.com`) && Path(`/offline.html`)"
+        - "traefik.http.routers.openwebui-offline.entrypoints=web"
+        - "traefik.http.routers.openwebui-offline.priority=1000"
+        - "traefik.http.routers.openwebui-offline.service=openwebui-sw"
+
+        # /offline.html (HTTPS)
+        - "traefik.http.routers.openwebui-offline-https.rule=Host(`openai.ayushpalak.com`) && Path(`/offline.html`)"
+        - "traefik.http.routers.openwebui-offline-https.entrypoints=websecure"
+        - "traefik.http.routers.openwebui-offline-https.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.openwebui-offline-https.priority=1000"
+        - "traefik.http.routers.openwebui-offline-https.service=openwebui-sw"
+
+        # Target service for the sidecar
+        - "traefik.http.services.openwebui-sw.loadbalancer.server.port=8080"
+
+        # Required SW headers + diagnostic header
+        - "traefik.http.routers.openwebui-swjs.middlewares=openwebui-sw-headers"
+        - "traefik.http.routers.openwebui-swjs-https.middlewares=openwebui-sw-headers"
+        - "traefik.http.middlewares.openwebui-sw-headers.headers.customresponseheaders.Service-Worker-Allowed=/"
+        - "traefik.http.middlewares.openwebui-sw-headers.headers.customresponseheaders.Cache-Control=no-cache"
+        - "traefik.http.middlewares.openwebui-sw-headers.headers.customresponseheaders.X-SW-Served-By=sidecar"
 ```
 
 - All other routes continue to your existing `openwebui` service.
-- The Path() matcher ensures only `/sw.js` and `/offline.html` are served by the sidecar.
+- Dedicated routers for both HTTP and HTTPS ensure only `/sw.js` and `/offline.html` are served by the sidecar.
+- `traefik.docker.network=traefik-proxy` is set so Traefik selects the correct network.
 
 3) Redeploy your stack. Validate with:
 
 ```
 curl -I https://openai.ayushpalak.com/sw.js
-# Expect: Service-Worker-Allowed: / and Cache-Control: no-cache
+# Expect: Service-Worker-Allowed: /, Cache-Control: no-cache, and X-SW-Served-By: sidecar
 ```
 
 ---
@@ -113,7 +149,7 @@ Optional: Add a second rule to cache static assets more aggressively, e.g., rege
 
 ## Validation checklist
 
-- `curl -I https://openai.ayushpalak.com/sw.js` shows the headers
+- `curl -I https://openai.ayushpalak.com/sw.js` shows the headers (including `X-SW-Served-By: sidecar`)
 - Visit the site in a browser → DevTools → Application → Service Workers → shows registered
 - Offline navigation shows `offline.html`
 - Conversation GET `/api/v1/chats/:id` returns cached data when offline
