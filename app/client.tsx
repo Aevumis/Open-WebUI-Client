@@ -5,8 +5,10 @@ import { useLocalSearchParams, router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
-import { maybeFullSync } from "../lib/sync";
+import { maybeFullSync, isFullSyncDone } from "../lib/sync";
+import { getCacheIndex } from "../lib/cache";
 import { drain } from "../lib/outbox";
+import { debug as logDebug, info as logInfo } from "../lib/log";
 
 const STORAGE_KEY = "servers:list";
 
@@ -19,8 +21,7 @@ export default function ClientScreen() {
   useEffect(() => {
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
       const next = state.isInternetReachable ?? !!state.isConnected;
-      // eslint-disable-next-line no-console
-      console.log('[net] change', { isConnected: state.isConnected, isInternetReachable: state.isInternetReachable, effectiveOnline: next });
+      logDebug('net', 'change', { isConnected: state.isConnected, isInternetReachable: state.isInternetReachable, effectiveOnline: next });
       setIsOnline(next);
     });
     return () => sub();
@@ -41,28 +42,54 @@ export default function ClientScreen() {
     })();
   }, [params.id]);
 
-  // Kick off initial sync (last 30 convos) and drain outbox when online
+  // Kick off sync and keep retrying periodically until done; also drain outbox each attempt
   useEffect(() => {
     if (!url || !isOnline) return;
     let cancelled = false;
-    (async () => {
+    let running = false;
+
+    const attempt = async () => {
+      if (running) return;
+      running = true;
       try {
-        // eslint-disable-next-line no-console
-        console.log('[sync] maybeFullSync start');
-        await maybeFullSync(url);
-        // eslint-disable-next-line no-console
-        console.log('[sync] maybeFullSync done');
+        logInfo('sync', 'maybeFullSync start');
+        const res = await maybeFullSync(url);
+        if (res) {
+          logInfo('sync', 'fullSync result', res);
+          try {
+            const idx = await getCacheIndex();
+            const host = new URL(url).host;
+            const count = idx.filter(it => it.host === host).length;
+            logInfo('cache', 'index count for host', { host, count });
+          } catch {}
+        }
+        logInfo('sync', 'maybeFullSync done');
       } catch {}
+      try {
+        logInfo('outbox', 'drain start');
+        const dres = await drain(url);
+        logInfo('outbox', 'drain result', dres);
+      } catch {}
+      running = false;
+    };
+
+    // Immediate attempt
+    attempt();
+    // Retry every 5s until full sync done
+    const timer = setInterval(async () => {
       if (cancelled) return;
       try {
-        // eslint-disable-next-line no-console
-        console.log('[outbox] drain start');
-        const res = await drain(url);
-        // eslint-disable-next-line no-console
-        console.log('[outbox] drain result', res);
+        const done = await isFullSyncDone(url);
+        if (done) {
+          logInfo('sync', 'fullSync already done, stopping retries');
+          clearInterval(timer);
+          return;
+        }
       } catch {}
-    })();
-    return () => { cancelled = true; };
+      await attempt();
+    }, 5000);
+
+    return () => { cancelled = true; clearInterval(timer); };
   }, [url, isOnline]);
 
   if (!url) {

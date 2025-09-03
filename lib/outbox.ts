@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { debug as logDebug, info as logInfo, warn as logWarn } from "./log";
 
 export type OutboxItem = {
   id: string; // local UUID
@@ -85,7 +86,7 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
   const host = new URL(baseUrl).host;
   const token = await getToken(host);
   if (!token) {
-    try { console.log('[outbox][drain] no token, abort', { host }); } catch {}
+    logInfo('outbox', 'drain no token, abort', { host });
     return { sent: 0, remaining: (await getOutbox(host)).length };
   }
 
@@ -97,7 +98,7 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
 
   let sent = 0;
   const serviceUrl = `${baseUrl.replace(/\/$/, "")}/api/chat/completions`;
-  try { console.log('[outbox][drain] start', { host, serviceUrl, tokenPresent: !!token, initial: list.length, rps }); } catch {}
+  logInfo('outbox', 'drain start', { host, serviceUrl, tokenPresent: !!token, initial: list.length, rps });
 
   for (let i = 0; i < list.length; i++) {
     const it = list[i];
@@ -120,30 +121,30 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
         list.splice(i, 1);
         i--;
         await setOutbox(host, list);
-        try { console.log('[outbox][drain] sent', { id: it.id, chatId: it.chatId, status: res.status }); } catch {}
+        logDebug('outbox', 'sent', { id: it.id, chatId: it.chatId, status: res.status });
       } else if (res.status === 401) {
         // auth invalid; stop draining
-        try { console.log('[outbox][drain] unauthorized (401), stopping'); } catch {}
+        logWarn('outbox', 'unauthorized (401), stopping');
         throw new Error(`Unauthorized (401)`);
       } else {
         // keep for retry
         it.tries += 1;
         it.lastError = `HTTP ${res.status}`;
         await setOutbox(host, list);
-        try { console.log('[outbox][drain] keep for retry', { id: it.id, chatId: it.chatId, status: res.status }); } catch {}
+        logDebug('outbox', 'keep for retry', { id: it.id, chatId: it.chatId, status: res.status });
       }
     } catch (e: any) {
       // network or auth error; keep and stop early
       it.tries += 1;
       it.lastError = e?.message || String(e);
       await setOutbox(host, list);
-      try { console.log('[outbox][drain] error', { id: it.id, chatId: it.chatId, error: it.lastError }); } catch {}
+      logWarn('outbox', 'error', { id: it.id, chatId: it.chatId, error: it.lastError });
       break;
     }
     if (minInterval) await sleep(minInterval);
   }
 
   const remaining = (await getOutbox(host)).length;
-  try { console.log('[outbox][drain] done', { sent, remaining }); } catch {}
+  logInfo('outbox', 'drain done', { sent, remaining });
   return { sent, remaining };
 }

@@ -5,10 +5,11 @@ import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { cacheApiResponse, type CachedEntry } from "../lib/cache";
-import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems } from "../lib/outbox";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
+import { debug as logDebug, info as logInfo } from "../lib/log";
 
-// Debug log-level switch for WebView debug messages
-const DEBUG_WEBVIEW_DEBUG_LOGS = typeof __DEV__ !== 'undefined' ? __DEV__ : true;
+// WebView debug logs are now gated via centralized logger scopes/levels
 
 function buildInjection(baseUrl: string) {
   // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
@@ -121,63 +122,98 @@ function buildInjection(baseUrl: string) {
           }
         } catch {}
       }, true);
+      // Backup: intercept form submit within the compose container (contains #chat-input)
+      document.addEventListener('submit', function(e){
+        try {
+          var tgt = e && e.target;
+          var form = (tgt && (tgt.tagName === 'FORM' ? tgt : (tgt.closest ? tgt.closest('form') : null))) || null;
+          if (!form) { return; }
+          var hasChatInput = !!(form && form.querySelector && form.querySelector('#chat-input'));
+          if (!hasChatInput) { return; }
+          var parts = (window.location.pathname || '').split('/').filter(Boolean);
+          var idx = parts.indexOf('c');
+          var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+          var rnValS = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+          var offlineS = (window.__owui_wasOffline === true) || (rnValS === false);
+          if (!offlineS) { return; }
+          var textNowS = '';
+          var nodeS = form.querySelector('textarea, [contenteditable="true"], [role="textbox"]') || document.querySelector('#chat-input') || document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+          if (nodeS) {
+            if ('value' in nodeS) { textNowS = (nodeS.value||'').trim(); }
+            else { textNowS = (nodeS.innerText || nodeS.textContent || '').trim(); }
+          }
+          try { window.__owui_lastTextCandidate = textNowS; } catch {}
+          if (textNowS && cid) {
+            post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'submit', chatId: cid, len: textNowS.length });
+            post({ type: 'queueMessage', chatId: cid, body: { uiText: textNowS } });
+            try {
+              if (nodeS) {
+                if ('value' in nodeS) { nodeS.value = ''; try { nodeS.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
+                else { nodeS.innerText = ''; try { nodeS.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
+              }
+            } catch {}
+          }
+          try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
+          return;
+        } catch {}
+      }, true);
       document.addEventListener('click', function(e){
         try {
-          var btn = e && e.target && (e.target.closest ? e.target.closest('button,[role="button"]') : null);
-          if (btn) {
-            var parts = (window.location.pathname || '').split('/').filter(Boolean);
-            var idx = parts.indexOf('c');
-            var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
-            // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
-            var rnVal1 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-            var offline1 = (window.__owui_wasOffline === true) || (rnVal1 === false);
-            if (offline1) {
-              var textNow1 = '';
-              var node1 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-              if (node1) {
-                if ('value' in node1) { textNow1 = (node1.value||'').trim(); }
-                else { textNow1 = (node1.innerText || node1.textContent || '').trim(); }
-              }
-              try { window.__owui_lastTextCandidate = textNow1; } catch {}
-              if (textNow1 && cid) {
-                post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'click', chatId: cid, len: textNow1.length });
-                post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow1 } });
-                // Clear input to reflect queued state
-                try {
-                  if (node1) {
-                    if ('value' in node1) { node1.value = ''; try { node1.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
-                    else { node1.innerText = ''; try { node1.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
-                  }
-                } catch {}
-              }
-              try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
-              return;
+          // Only handle clicks on the explicit Send button to avoid blocking other buttons when offline
+          var sendBtn = e && e.target && (e.target.closest ? e.target.closest('#send-message-button') : null);
+          if (!sendBtn) { return; }
+          var parts = (window.location.pathname || '').split('/').filter(Boolean);
+          var idx = parts.indexOf('c');
+          var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
+          // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
+          var rnVal1 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+          var offline1 = (window.__owui_wasOffline === true) || (rnVal1 === false);
+          if (offline1) {
+            var textNow1 = '';
+            var node1 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+            if (node1) {
+              if ('value' in node1) { textNow1 = (node1.value||'').trim(); }
+              else { textNow1 = (node1.innerText || node1.textContent || '').trim(); }
             }
-            var startTick = Date.now();
-            // capture candidate text immediately
-            var textNow = '';
-            var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-            if (node) {
-              if ('value' in node) { textNow = (node.value||'').trim(); }
-              else { textNow = (node.innerText || node.textContent || '').trim(); }
-            }
-            try { window.__owui_lastTextCandidate = textNow; } catch {}
-            post({ type: 'debug', scope: 'injection', event: 'buttonClick', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
-            // Fallback: if offline and no completion fetch follows shortly, queue from DOM
-            setTimeout(function(){
+            try { window.__owui_lastTextCandidate = textNow1; } catch {}
+            if (textNow1 && cid) {
+              post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'clickSend', chatId: cid, len: textNow1.length });
+              post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow1 } });
+              // Clear input to reflect queued state
               try {
-                var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-                var offline = (window.__owui_wasOffline === true) || (rnVal === false);
-                if (!offline) return;
-                if ((window.__owui_lastCompletionTick||0) > startTick) return;
-                var text = String(window.__owui_lastTextCandidate||'').trim();
-                if (text && cid) {
-                  post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
-                  post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
+                if (node1) {
+                  if ('value' in node1) { node1.value = ''; try { node1.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
+                  else { node1.innerText = ''; try { node1.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
                 }
               } catch {}
-            }, 1200);
+            }
+            try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
+            return;
           }
+          var startTick = Date.now();
+          // capture candidate text immediately
+          var textNow = '';
+          var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+          if (node) {
+            if ('value' in node) { textNow = (node.value||'').trim(); }
+            else { textNow = (node.innerText || node.textContent || '').trim(); }
+          }
+          try { window.__owui_lastTextCandidate = textNow; } catch {}
+          post({ type: 'debug', scope: 'injection', event: 'buttonClickSend', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
+          // Fallback: if offline and no completion fetch follows shortly, queue from DOM
+          setTimeout(function(){
+            try {
+              var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
+              var offline = (window.__owui_wasOffline === true) || (rnVal === false);
+              if (!offline) return;
+              if ((window.__owui_lastCompletionTick||0) > startTick) return;
+              var text = String(window.__owui_lastTextCandidate||'').trim();
+              if (text && cid) {
+                post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
+                post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
+              }
+            } catch {}
+          }, 1200);
         } catch {}
       }, true);
     } catch {}
@@ -191,7 +227,30 @@ function buildInjection(baseUrl: string) {
 
     function checkAuthOnce() {
       if (sentAuth) return;
-      const t = getCookie('token') || getCookie('authjs.session-token');
+      // Try common cookie names used by Auth.js/NextAuth and a generic session-token fallback
+      const names = [
+        'authjs.session-token',
+        '__Secure-authjs.session-token',
+        'next-auth.session-token',
+        '__Secure-next-auth.session-token',
+        'token',
+      ];
+      let t = null;
+      for (var i = 0; i < names.length && !t; i++) { t = getCookie(names[i]); }
+      if (!t) {
+        try {
+          var parts = (document.cookie || '').split(';');
+          for (var j = 0; j < parts.length && !t; j++) {
+            var kv = parts[j].trim();
+            var eq = kv.indexOf('=');
+            if (eq > 0) {
+              var k = kv.slice(0, eq);
+              var v = decodeURIComponent(kv.slice(eq + 1));
+              if (/session-token$/i.test(k)) { t = v; break; }
+            }
+          }
+        } catch (_) {}
+      }
       if (t) { sentAuth = true; post({ type: 'authToken', token: t }); post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' }); }
     }
 
@@ -384,14 +443,14 @@ function buildInjection(baseUrl: string) {
 export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; online: boolean }) {
   const webref = useRef<WebView>(null);
   const drainingRef = React.useRef(false);
+  const syncingRef = React.useRef(false);
   const baseUrlRef = React.useRef(baseUrl);
   React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
 
   // Mount-time visibility
   React.useEffect(() => {
     try {
-      // eslint-disable-next-line no-console
-      console.log('[WebView] mount', { baseUrl });
+      logInfo('webview', 'mount', { baseUrl });
     } catch {}
   }, [baseUrl]);
 
@@ -402,8 +461,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       const items = await listOutbox(host);
       if (!items.length) { drainingRef.current = false; return; }
       const batch = items.slice(0, 3).map((it) => ({ id: it.id, chatId: it.chatId, body: it.body }));
-      // eslint-disable-next-line no-console
-      console.log('[webviewDrain] sending batch', { size: batch.length });
+      logInfo('webviewDrain', 'sending batch', { size: batch.length });
       const js = `(() => { (async function(){
         try {
           const items = ${JSON.stringify(batch)};
@@ -472,24 +530,90 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
     } catch {}
   }, []);
 
+  // WebView-assisted full sync for when cookies exist but native token is not available (httpOnly)
+  const injectWebSync = useCallback(async () => {
+    try {
+      const host = new URL(baseUrlRef.current).host;
+      const { limitConversations, rps } = await getSettings(host);
+      const minInterval = Math.max(0, Math.floor(1000 / Math.max(1, rps)));
+      const js = `(() => { (async () => {
+        function post(m){ try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(m)); } catch(_){} }
+        try {
+          if (window.__owui_syncing) { post({ type: 'debug', scope: 'injection', event: 'syncSkipAlreadyRunning' }); return; }
+          window.__owui_syncing = true;
+          post({ type: 'debug', scope: 'injection', event: 'syncStart' });
+          const LIMIT = ${Number.isFinite(0) ? '' : ''}${limitConversations};
+          const MIN = ${minInterval};
+          let page = 1;
+          const chats = [];
+          for (;;) {
+            const res = await fetch('/api/v1/chats/?page=' + page, { headers: { accept: 'application/json' }, credentials: 'include' });
+            if (!res || !res.ok) break;
+            const data = await res.json();
+            if (!Array.isArray(data) || data.length === 0) break;
+            for (let i=0;i<data.length;i++) {
+              const it = data[i];
+              chats.push({ id: it.id, title: it.title });
+              if (chats.length >= LIMIT) break;
+            }
+            if (chats.length >= LIMIT) break;
+            if (MIN) { await new Promise(r=>setTimeout(r, MIN)); }
+            page += 1;
+          }
+          let messages = 0;
+          for (let i=0;i<chats.length;i++) {
+            const c = chats[i];
+            const url = '/api/v1/chats/' + c.id;
+            try {
+              const res = await fetch(url, { headers: { accept: 'application/json' }, credentials: 'include' });
+              if (res && res.ok) {
+                const data = await res.json();
+                if (data && data.archived === true) {
+                  // skip archived
+                } else {
+                  try { post({ type: 'cacheResponse', url: (location.origin + url), data }); } catch(_){ }
+                  try {
+                    const mcount = Array.isArray(data && data.chat && data.chat.messages) ? data.chat.messages.length : (Array.isArray(data && data.messages) ? data.messages.length : 0);
+                    messages += (mcount || 0);
+                  } catch(_){}
+                }
+              }
+            } catch(_){}
+            if (MIN) { await new Promise(r=>setTimeout(r, MIN)); }
+          }
+          post({ type: 'syncDone', conversations: chats.length, messages });
+        } catch (e) {
+          try { post({ type: 'debug', scope: 'injection', event: 'syncError', message: String(e && e.message || e) }); } catch(_){}
+        } finally {
+          try { window.__owui_syncing = false; } catch(_){ }
+        }
+      })(); })();`;
+      syncingRef.current = true;
+      webref.current?.injectJavaScript(js);
+    } catch {}
+  }, []);
+
   const onMessage = useCallback(async (e: WebViewMessageEvent) => {
     try {
       const msg = JSON.parse(e.nativeEvent.data || '{}');
       const host = new URL(baseUrl).host;
       if (msg.type === 'debug') {
-        // Surface WebView injection debug events only when enabled
-        if (DEBUG_WEBVIEW_DEBUG_LOGS) {
-          // eslint-disable-next-line no-console
-          console.log('[WebView][debug]', msg);
-        }
+        logDebug('webview', 'debug', msg);
+        try {
+          if ((msg.event === 'injected' || msg.event === 'hasInjected') && !syncingRef.current) {
+            const tok = await getToken(host);
+            if (!tok) {
+              await injectWebSync();
+            }
+          }
+        } catch {}
         return;
       }
       if (msg.type === 'drainBatchResult' && Array.isArray(msg.successIds)) {
         await removeOutboxItems(host, msg.successIds);
         const remaining = await count(host);
         const token = await getToken(host);
-        // eslint-disable-next-line no-console
-        console.log('[webviewDrain] batch result', { removed: msg.successIds.length, remaining });
+        logInfo('webviewDrain', 'batch result', { removed: msg.successIds.length, remaining });
         if (!token && remaining > 0) {
           await injectWebDrainBatch();
         } else {
@@ -498,23 +622,28 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
         return;
       }
       if (msg.type === 'drainBatchError') {
-        // eslint-disable-next-line no-console
-        console.log('[webviewDrain] batch error', { error: msg.error });
+        logInfo('webviewDrain', 'batch error', { error: msg.error });
         drainingRef.current = false;
         return;
       }
       if (msg.type === 'authToken' && typeof msg.token === 'string') {
         await setToken(host, msg.token);
-        // eslint-disable-next-line no-console
-        console.log('[outbox] token saved for host', host);
+        logInfo('outbox', 'token saved for host', { host });
+        return;
+      }
+      if (msg.type === 'syncDone') {
+        try {
+          await AsyncStorage.setItem(`sync:done:${host}`, String(Date.now()));
+          logInfo('sync', 'done flag set (webview-assisted)', { host, conversations: msg.conversations, messages: msg.messages });
+        } catch {}
+        syncingRef.current = false;
         return;
       }
       if (msg.type === 'queueMessage' && msg.chatId && msg.body) {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
         const c = await count(host);
-        // eslint-disable-next-line no-console
-        console.log('[outbox] enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
+        logInfo('outbox', 'enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
         return;
       }
       if (msg.type === 'externalLink' && typeof msg.url === 'string') {
@@ -544,8 +673,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       }
     } catch (err) {
       try {
-        // eslint-disable-next-line no-console
-        console.log('[WebView][raw]', String(e?.nativeEvent?.data || ''));
+        logDebug('webview', 'raw', String(e?.nativeEvent?.data || ''));
       } catch {}
     }
   }, [baseUrl, injectWebDrainBatch]);
@@ -569,8 +697,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       const [c, token] = [await count(host), await getToken(host)];
       if (c > 0 && !token && !drainingRef.current) {
         drainingRef.current = true;
-        // eslint-disable-next-line no-console
-        console.log('[webviewDrain] start (no native token)', { host, pending: c });
+        logInfo('webviewDrain', 'start (no native token)', { host, pending: c });
         await injectWebDrainBatch();
       }
     })();
@@ -579,8 +706,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
   // One-shot manual injection attempt as a fallback
   React.useEffect(() => {
     try {
-      // eslint-disable-next-line no-console
-      console.log('[WebView] manual inject attempt');
+      logDebug('webview', 'manual inject attempt');
       webref.current?.injectJavaScript(`${injected};true;`);
     } catch {}
   }, [injected]);
@@ -621,8 +747,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
             WebBrowser.openBrowserAsync(req.url);
             return false;
           }
-          // eslint-disable-next-line no-console
-          console.log('[WebView] allow navigation', current.toString());
+          logDebug('webview', 'allow navigation', current.toString());
           return true;
         } catch {
           return true;
@@ -632,8 +757,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       injectedJavaScript={injected}
       onLoadEnd={() => {
         try {
-          // eslint-disable-next-line no-console
-          console.log('[WebView] onLoadEnd reinject');
+          logDebug('webview', 'onLoadEnd reinject');
           // Attempt plain reinject
           webref.current?.injectJavaScript(`${injected};true;`);
           // Probe the bridge explicitly
@@ -647,8 +771,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       }}
       onNavigationStateChange={(navState) => {
         try {
-          // eslint-disable-next-line no-console
-          console.log('[WebView] nav change', navState.url);
+          logDebug('webview', 'nav change', navState.url);
           webref.current?.injectJavaScript(`${injected};true;`);
           const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
           webref.current?.injectJavaScript(WRAP);
@@ -657,8 +780,7 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
       }}
       onError={(syntheticEvent) => {
         try {
-          // eslint-disable-next-line no-console
-          console.log('[WebView] error', syntheticEvent.nativeEvent);
+          logInfo('webview', 'error', syntheticEvent.nativeEvent);
         } catch {}
       }}
       allowsBackForwardNavigationGestures
