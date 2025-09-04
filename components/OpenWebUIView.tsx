@@ -8,6 +8,7 @@ import { cacheApiResponse, type CachedEntry } from "../lib/cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
+import { useToast } from "./Toast";
 
 // WebView debug logs are now gated via centralized logger scopes/levels
 
@@ -440,12 +441,13 @@ function buildInjection(baseUrl: string) {
   })();`;
 }
 
-export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; online: boolean }) {
+export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: { baseUrl: string; online: boolean; onQueueCountChange?: (count: number) => void }) {
   const webref = useRef<WebView>(null);
   const drainingRef = React.useRef(false);
   const syncingRef = React.useRef(false);
   const baseUrlRef = React.useRef(baseUrl);
   React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
+  const toast = useToast();
 
   // Mount-time visibility
   React.useEffect(() => {
@@ -617,6 +619,8 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
         const remaining = await count(host);
         const token = await getToken(host);
         logInfo('webviewDrain', 'batch result', { removed: msg.successIds.length, remaining });
+        try { if (msg.successIds.length > 0) toast.show(`Sent ${msg.successIds.length} queued`, { type: 'success' }); } catch {}
+        try { onQueueCountChange && onQueueCountChange(remaining); } catch {}
         if (!token && remaining > 0) {
           await injectWebDrainBatch();
         } else {
@@ -647,6 +651,8 @@ export default function OpenWebUIView({ baseUrl, online }: { baseUrl: string; on
         await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
         const c = await count(host);
         logInfo('outbox', 'enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
+        try { toast.show('Message queued'); } catch {}
+        try { onQueueCountChange && onQueueCountChange(c); } catch {}
         return;
       }
       if (msg.type === 'externalLink' && typeof msg.url === 'string') {

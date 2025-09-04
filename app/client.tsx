@@ -7,8 +7,9 @@ import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
 import { maybeFullSync, isFullSyncDone } from "../lib/sync";
 import { getCacheIndex } from "../lib/cache";
-import { drain, getSettings } from "../lib/outbox";
+import { drain, getSettings, count } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
+import { useToast } from "../components/Toast";
 
 const STORAGE_KEY = "servers:list";
 
@@ -17,6 +18,8 @@ export default function ClientScreen() {
   const [url, setUrl] = useState<string | null>(null);
   const [label, setLabel] = useState<string | undefined>(undefined);
   const [isOnline, setIsOnline] = useState(true);
+  const [queuedCount, setQueuedCount] = useState(0);
+  const toast = useToast();
 
   useEffect(() => {
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
@@ -41,6 +44,17 @@ export default function ClientScreen() {
       setLabel(s.label);
     })();
   }, [params.id]);
+
+  // Initialize queued count when URL changes
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!url) return;
+        const c = await count(new URL(url).host);
+        setQueuedCount(c);
+      } catch {}
+    })();
+  }, [url]);
 
   // Kick off sync and keep retrying periodically until done; also drain outbox each attempt
   useEffect(() => {
@@ -74,6 +88,8 @@ export default function ClientScreen() {
         logInfo('outbox', 'drain start');
         const dres = await drain(url);
         logInfo('outbox', 'drain result', dres);
+        try { setQueuedCount(dres.remaining); } catch {}
+        try { if (dres.sent > 0) toast.show(`Sent ${dres.sent} queued`, { type: 'success' }); } catch {}
       } catch {}
       running = false;
     };
@@ -120,11 +136,18 @@ export default function ClientScreen() {
           <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Servers</Text>
         </TouchableOpacity>
         <Text style={{ fontWeight: "700" }}>{label || url}</Text>
-        <TouchableOpacity onPress={() => router.push("/offline")}>
-          <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Offline</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {queuedCount > 0 && (
+            <View style={{ backgroundColor: '#0a7ea4', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, marginRight: 10 }}>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Queued: {queuedCount}</Text>
+            </View>
+          )}
+          <TouchableOpacity onPress={() => router.push("/offline")}>
+            <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Offline</Text>
+          </TouchableOpacity>
+        </View>
       </View>
-      <OpenWebUIView baseUrl={url} online={isOnline} />
+      <OpenWebUIView baseUrl={url} online={isOnline} onQueueCountChange={setQueuedCount} />
     </SafeAreaView>
   );
 }
