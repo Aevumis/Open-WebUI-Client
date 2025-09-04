@@ -48,3 +48,45 @@ Join our community of developers creating universal apps.
 
 - [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
 - [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+
+## Open WebUI Client integration and offline support
+
+This app embeds an Open WebUI instance in a WebView and adds native capabilities:
+
+- Offline message queueing and automatic outbox drain when back online
+- Native offline cache for conversation JSON (viewable in the app’s Offline screen)
+- Optional in-WebView offline browsing via a Service Worker on your Open WebUI origin
+
+### Enabling offline inside the WebView (Service Worker)
+
+To enable in-WebView offline navigations and asset caching, deploy a Service Worker at your Open WebUI origin:
+
+- Serve `sw.js` at `/sw.js` and `offline.html` at `/offline.html`
+- Required headers on `/sw.js`:
+  - `Service-Worker-Allowed: /`
+  - `Cache-Control: no-cache`
+- If you use Cloudflare, add a Cache Rule (or Page Rule) to bypass edge caching for `/sw.js`
+
+We include a ready-to-use sidecar approach (e.g., small static Caddy server behind Traefik) and full instructions here:
+
+- `webui-sw/README.md` (in this repo) → [webui-sw/README.md](./webui-sw/README.md)
+- GitHub repository URL: https://github.com/Aevumis/Open-WebUI-Client
+
+Validation quick checks:
+
+```
+curl -I https://<your-domain>/sw.js
+# Expect: Service-Worker-Allowed: / and Cache-Control: no-cache
+
+curl -I https://<your-domain>/offline.html
+# Expect: 200 OK
+```
+
+### What if I don’t deploy the Service Worker?
+
+- Online WebView usage: Works normally
+- Offline queueing/outbox: Works (messages are queued and later sent)
+- Native offline viewing: Works via the app’s Offline screen (conversations cached natively)
+- In-WebView offline browsing: Not available (no offline shell or cached assets without the SW)
+
+When the app detects that `/sw.js` is not present on a server you open, it will show a one-time hint with a link to the docs above.

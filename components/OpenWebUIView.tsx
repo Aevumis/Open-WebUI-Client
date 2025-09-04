@@ -259,6 +259,37 @@ function buildInjection(baseUrl: string) {
     // Register Service Worker for offline shell + API cache (served at origin /sw.js)
     if ('serviceWorker' in navigator) {
       try { navigator.serviceWorker.register('/sw.js', { scope: '/' }); } catch (e) {}
+      // Probe availability and report to native for UX hints
+      (async function(){
+        try {
+          let hasSW = false;
+          let method = 'regCheck';
+          let status = null;
+          try {
+            // Prefer HEAD to avoid downloading file; fall back to GET if HEAD is blocked
+            method = 'head';
+            const res = await fetch('/sw.js', { method: 'HEAD', cache: 'no-store' });
+            status = res && res.status;
+            hasSW = !!(res && res.ok);
+            if (!hasSW && (!res || status === 405 || status === 501)) {
+              method = 'get';
+              const res2 = await fetch('/sw.js', { method: 'GET', cache: 'no-store' });
+              status = res2 && res2.status;
+              hasSW = !!(res2 && res2.ok);
+            }
+          } catch (_) {}
+          if (!hasSW) {
+            try {
+              const reg = await (navigator.serviceWorker.getRegistration ? navigator.serviceWorker.getRegistration() : Promise.resolve(null));
+              hasSW = !!reg;
+            } catch (_) {}
+          }
+          try { post({ type: 'swStatus', hasSW, method, status }); } catch(_){}
+        } catch (_) {}
+      })();
+    }
+    else {
+      try { post({ type: 'swStatus', hasSW: false, method: 'unsupported' }); } catch(_){}
     }
 
     function shouldCache(url) {
@@ -673,6 +704,25 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
             } else if (!settings.fullSyncOnLoad) {
               logInfo('sync', 'fullSyncOnLoad disabled, skip webview-assisted sync');
             }
+          }
+        } catch {}
+        return;
+      }
+      if (msg.type === 'swStatus') {
+        logInfo('webview', 'swStatus', msg);
+        try {
+          const key = `swhint:${host}`;
+          const shown = await AsyncStorage.getItem(key);
+          if (!msg.hasSW && shown !== '1') {
+            await AsyncStorage.setItem(key, '1');
+            Toast.show({
+              type: 'info',
+              text1: 'Offline inside WebView is not enabled',
+              text2: 'Tap to learn how to enable the Service Worker for this server.',
+              onPress: async () => {
+                try { await WebBrowser.openBrowserAsync('https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw'); } catch {}
+              },
+            });
           }
         } catch {}
         return;
