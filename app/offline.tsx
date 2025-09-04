@@ -3,14 +3,28 @@ import { ActivityIndicator, FlatList, ScrollView, Text, TextInput, TouchableOpac
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
 import { router } from "expo-router";
+import { useNavigation } from "@react-navigation/native";
 
 export default function OfflineScreen() {
+  const navigation = useNavigation<any>();
   const [items, setItems] = useState<CacheIndexItem[]>([]);
   const [titles, setTitles] = useState<Record<string, string>>({});
   const [updatedMap, setUpdatedMap] = useState<Record<string, number>>({});
   const [hostFilter, setHostFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
   const [initializing, setInitializing] = useState(true);
+
+  const goBackOrServers = () => {
+    try {
+      if (navigation?.canGoBack?.()) {
+        navigation.goBack();
+      } else {
+        router.replace('/servers' as any);
+      }
+    } catch {
+      router.replace('/servers' as any);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -140,7 +154,7 @@ export default function OfflineScreen() {
       {initializing ? (
         <View style={{ padding: 16, gap: 12 }}>
           <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 4 }}>
-            <TouchableOpacity onPress={() => router.replace('/servers' as any)}>
+            <TouchableOpacity onPress={goBackOrServers}>
               <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>{"\u2039"} Back</Text>
             </TouchableOpacity>
           </View>
@@ -160,7 +174,7 @@ export default function OfflineScreen() {
         ListHeaderComponent={
           <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#eee", backgroundColor: "#fff" }}>
             <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
-              <TouchableOpacity onPress={() => router.replace('/servers' as any)}>
+              <TouchableOpacity onPress={goBackOrServers}>
                 <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>{"\u2039"} Back</Text>
               </TouchableOpacity>
             </View>
