@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef } from "react";
-import { Alert, Platform } from "react-native";
+import { Alert, Platform, useColorScheme } from "react-native";
 import WebView, { WebViewMessageEvent } from "react-native-webview";
 import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
@@ -442,12 +442,74 @@ function buildInjection(baseUrl: string) {
   })();`;
 }
 
+// Document-start theme bootstrap: generic theming without app-specific internals.
+// - Shims matchMedia('(prefers-color-scheme: dark)') to reflect RN scheme
+// - Applies html class 'dark', data-theme attribute, and color-scheme style/meta
+// - Respects explicit user choice in localStorage ('light'|'dark'); only overrides null/system/auto
+// - Exposes window.__owui_notifyThemeChange(isDark) to re-assert later
+function buildThemeBootstrap(scheme: 'dark' | 'light' | null) {
+  const isDark = scheme === 'dark';
+  return `(() => { try {
+    var isDark = ${isDark ? 'true' : 'false'};
+    try { window.__owui_rnColorScheme = isDark ? 'dark' : 'light'; } catch(_){ }
+    try {
+      var listeners = new Set();
+      var darkMql = {
+        matches: isDark,
+        media: '(prefers-color-scheme: dark)',
+        onchange: null,
+        addListener: function(fn){ try{ listeners.add(fn); }catch(_){ } },
+        removeListener: function(fn){ try{ listeners.delete(fn); }catch(_){ } },
+        addEventListener: function(type, fn){ if(type==='change') this.addListener(fn); },
+        removeEventListener: function(type, fn){ if(type==='change') this.removeListener(fn); }
+      };
+      function dispatchMql(){
+        try {
+          var ev = { matches: darkMql.matches, media: darkMql.media };
+          if (typeof darkMql.onchange === 'function') { try { darkMql.onchange(ev); } catch(_){} }
+          listeners.forEach(function(fn){ try { fn(ev); } catch(_){} });
+        } catch(_){ }
+      }
+      var origMatchMedia = window.matchMedia;
+      function owuiMatchMedia(q){
+        try {
+          if (typeof q === 'string' && /\(prefers-color-scheme:\s*dark\)/i.test(q)) { return darkMql; }
+        } catch(_){ }
+        return origMatchMedia ? origMatchMedia.call(window, q) : { matches: false, media: String(q||''), onchange: null, addListener: function(){}, removeListener: function(){}, addEventListener: function(){}, removeEventListener: function(){} };
+      }
+      try { Object.defineProperty(window, 'matchMedia', { configurable: true, get: function(){ return owuiMatchMedia; } }); } catch(_){ }
+      window.__owui_notifyThemeChange = function(isDarkNow){
+        try {
+          darkMql.matches = !!isDarkNow;
+          try { document && document.documentElement && document.documentElement.classList && document.documentElement.classList.toggle('dark', !!isDarkNow); } catch(_){ }
+          try { document && document.documentElement && document.documentElement.setAttribute && document.documentElement.setAttribute('data-theme', (!!isDarkNow ? 'dark' : 'light')); } catch(_){ }
+          try { document && document.documentElement && document.documentElement.style && (document.documentElement.style.colorScheme = (!!isDarkNow ? 'dark' : 'light')); } catch(_){ }
+          try { var meta = document.querySelector('meta[name="color-scheme"]'); if(!meta){ meta = document.createElement('meta'); meta.setAttribute('name','color-scheme'); (document.head||document.documentElement).appendChild(meta); } meta.setAttribute('content', 'dark light'); } catch(_){ }
+          try {
+            var stored = null; try { stored = localStorage.getItem('theme'); } catch(_){ }
+            if (stored === null || /^(system|auto)$/i.test(String(stored))) {
+              try { localStorage.setItem('theme', (!!isDarkNow ? 'dark' : 'light')); localStorage.setItem('resolvedTheme', (!!isDarkNow ? 'dark' : 'light')); } catch(_){ }
+            }
+          } catch(_){ }
+          try { window && window.dispatchEvent && window.dispatchEvent(new Event('storage')); } catch(_){ }
+          dispatchMql();
+        } catch(_){ }
+      };
+      // Initialize now
+      window.__owui_notifyThemeChange(isDark);
+    } catch(_){ }
+    try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'injection', event:'themeBootstrap' })); } catch(_){ }
+  } catch(_){ } })();`;
+}
+
 export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: { baseUrl: string; online: boolean; onQueueCountChange?: (count: number) => void }) {
   const webref = useRef<WebView>(null);
   const drainingRef = React.useRef(false);
   const syncingRef = React.useRef(false);
   const baseUrlRef = React.useRef(baseUrl);
   React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
+  const colorScheme = useColorScheme();
+  const isAndroid = Platform.OS === 'android';
 
   // Mount-time visibility
   React.useEffect(() => {
@@ -643,6 +705,12 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
         logInfo('outbox', 'token saved for host', { host });
         return;
       }
+      if (msg.type === 'themeProbe' && msg.payload) {
+        try {
+          logInfo('theme', 'probe', msg.payload);
+        } catch {}
+        return;
+      }
       if (msg.type === 'syncDone') {
         try {
           await AsyncStorage.setItem(`sync:done:${host}`, String(Date.now()));
@@ -696,6 +764,8 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   }, [baseUrl, injectWebDrainBatch]);
 
   const injected = useMemo(() => buildInjection(baseUrl), [baseUrl]);
+  const themeBootstrap = useMemo(() => buildThemeBootstrap(colorScheme as 'dark' | 'light' | null), [colorScheme]);
+  const beforeScripts = useMemo(() => `${themeBootstrap};${injected}`, [themeBootstrap, injected]);
 
   // Keep page aware of RN connectivity so DOM fallback can enqueue when RN says offline
   React.useEffect(() => {
@@ -705,6 +775,64 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       webref.current?.injectJavaScript(js);
     } catch {}
   }, [online]);
+
+  // Debug: inject a theme probe to read the page's current theme-related state
+  const injectThemeProbe = useCallback(() => {
+    try {
+      const js = `(function(){try{
+        var html = document.documentElement||{};
+        var body = document.body||{};
+        var hasDarkClass = !!(html.classList && html.classList.contains('dark'));
+        var dataTheme = (html.getAttribute && html.getAttribute('data-theme')) || null;
+        var colorSchemeStyle = (html.style && html.style.colorScheme) || null;
+        var localTheme = null, localResolved = null;
+        try { localTheme = localStorage.getItem('theme'); } catch(_){}
+        try { localResolved = localStorage.getItem('resolvedTheme'); } catch(_){}
+        var mqlDark = null; try { var m = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)'); mqlDark = !!(m && m.matches); } catch(_){}
+        var rnScheme = (typeof window.__owui_rnColorScheme==='string') ? window.__owui_rnColorScheme : null;
+        var pageBg = null; try { pageBg = window.getComputedStyle(body).backgroundColor; } catch(_){}
+        var htmlBg = null; try { htmlBg = window.getComputedStyle(html).backgroundColor; } catch(_){}
+        window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'themeProbe', payload: { hasDarkClass, dataTheme, colorSchemeStyle, localTheme, localResolved, mqlDark, rnScheme, pageBg, htmlBg } }));
+      }catch(e){ try{ window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'probe', event:'themeProbeError', message:String(e && e.message || e) })); }catch(_){} }})();`;
+      webref.current?.injectJavaScript(js);
+    } catch {}
+  }, []);
+
+  // Apply device color scheme inside the WebView (helps when matchMedia doesn't reflect OS in RN WebView)
+  React.useEffect(() => {
+    try {
+      const dark = colorScheme === 'dark';
+      logInfo('theme', 'apply RN scheme', { scheme: colorScheme });
+      const js = `(() => { try {
+        var isDark = ${colorScheme === 'dark' ? 'true' : 'false'};
+        try { window.__owui_rnColorScheme = isDark ? 'dark' : 'light'; } catch(_){ }
+        try {
+          if (typeof window.__owui_notifyThemeChange === 'function') {
+            window.__owui_notifyThemeChange(isDark);
+          } else {
+            // Fallback generic application without overriding explicit user theme
+            try { if (document && document.documentElement && document.documentElement.classList) { document.documentElement.classList.toggle('dark', isDark); } } catch(_){ }
+            try { document && document.documentElement && document.documentElement.setAttribute && document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light'); } catch(_){ }
+            try { document && document.documentElement && document.documentElement.style && (document.documentElement.style.colorScheme = isDark ? 'dark' : 'light'); } catch(_){ }
+            try { var stored = null; try{ stored = localStorage.getItem('theme'); }catch(_){ }
+                 if (stored === null || /^(system|auto)$/i.test(String(stored))) {
+                   try { localStorage.setItem('theme', (isDark ? 'dark' : 'light')); localStorage.setItem('resolvedTheme', (isDark ? 'dark' : 'light')); } catch(_){ }
+                 }
+            } catch(_){ }
+            try { if (window && window.dispatchEvent) { window.dispatchEvent(new Event('storage')); } } catch(_){ }
+          }
+          try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'rn', event:'colorSchemeApplied', scheme: (isDark ? 'dark':'light') })); } catch(_){ }
+        } catch(_){ }
+      } catch(_){ } })();`;
+      webref.current?.injectJavaScript(js);
+      // Probe immediately after applying
+      injectThemeProbe();
+      if (isAndroid) {
+        // Note: react-native-webview supports forceDarkOn on Android; use it to encourage dark rendering where applicable
+        logInfo('theme', 'android forceDarkOn set', { forceDarkOn: !!dark });
+      }
+    } catch {}
+  }, [colorScheme, injectThemeProbe, isAndroid]);
 
   // On becoming online: if no native token but outbox has items, start webview-assisted drain
   React.useEffect(() => {
@@ -725,8 +853,10 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
     try {
       logDebug('webview', 'manual inject attempt');
       webref.current?.injectJavaScript(`${injected};true;`);
+      // Also perform a theme probe early
+      injectThemeProbe();
     } catch {}
-  }, [injected]);
+  }, [injected, injectThemeProbe]);
 
   return (
     <WebView
@@ -738,6 +868,8 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       geolocationEnabled // Android
       javaScriptEnabled
       domStorageEnabled
+      // Encourage Android to respect dark theme at the rendering layer (in addition to page CSS)
+      forceDarkOn={isAndroid && colorScheme === 'dark'}
       onFileDownload={async (e) => {
         try {
           const url = e.nativeEvent.downloadUrl;
@@ -770,7 +902,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
           return true;
         }
       }}
-      injectedJavaScriptBeforeContentLoaded={injected}
+      injectedJavaScriptBeforeContentLoaded={beforeScripts}
       injectedJavaScript={injected}
       onLoadEnd={() => {
         try {
@@ -784,6 +916,11 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
           webref.current?.injectJavaScript(WRAP);
           // Report whether our guard flag is set in page context
           webref.current?.injectJavaScript(`(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`);
+          // Re-assert theme via bootstrap notify if available
+          const APPLY = `(function(){try{var isDark=${colorScheme === 'dark' ? 'true' : 'false'}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
+          webref.current?.injectJavaScript(APPLY);
+          // Probe current theme state after load
+          injectThemeProbe();
         } catch {}
       }}
       onNavigationStateChange={(navState) => {
@@ -793,6 +930,11 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
           const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
           webref.current?.injectJavaScript(WRAP);
           webref.current?.injectJavaScript(`(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`);
+          // Re-assert theme on navigation changes
+          const APPLY = `(function(){try{var isDark=${colorScheme === 'dark' ? 'true' : 'false'}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
+          webref.current?.injectJavaScript(APPLY);
+          // Re-probe theme on each navigation to capture changes from the app
+          injectThemeProbe();
         } catch {}
       }}
       onError={(syntheticEvent) => {
