@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { ActivityIndicator, Alert, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Alert, Text, TouchableOpacity, View, useColorScheme } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -20,6 +20,26 @@ export default function ClientScreen() {
   const [label, setLabel] = useState<string | undefined>(undefined);
   const [isOnline, setIsOnline] = useState(true);
   const [queuedCount, setQueuedCount] = useState(0);
+  const scheme = useColorScheme();
+  const C = scheme === 'dark'
+    ? {
+        bg: '#0b0b0b',
+        cardBg: '#111111',
+        text: '#e5e7eb',
+        textStrong: '#ffffff',
+        separator: '#27272a',
+        primary: '#4fb3d9',
+        textOnPrimary: '#ffffff',
+      }
+    : {
+        bg: '#ffffff',
+        cardBg: '#ffffff',
+        text: '#111827',
+        textStrong: '#000000',
+        separator: '#eeeeee',
+        primary: '#0a7ea4',
+        textOnPrimary: '#ffffff',
+      };
 
   useEffect(() => {
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
@@ -127,28 +147,28 @@ export default function ClientScreen() {
 
   if (!url) {
     return (
-      <SafeAreaView style={{ flex: 1, alignItems: "center", justifyContent: "center" }} edges={["top", "bottom"]}>
-        <ActivityIndicator />
-        <Text style={{ marginTop: 8 }}>Loading…</Text>
+      <SafeAreaView style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: C.bg }} edges={["top", "bottom"]}>
+        <ActivityIndicator color={C.primary} />
+        <Text style={{ marginTop: 8, color: C.text }}>Loading…</Text>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top", "bottom"]}>
-      <View style={{ height: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }} edges={["top", "bottom"]}>
+      <View style={{ height: 48, backgroundColor: C.cardBg, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: C.separator }}>
         <TouchableOpacity onPress={() => router.replace("/servers")}>
-          <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Servers</Text>
+          <Text style={{ color: C.primary, fontWeight: "700" }}>Servers</Text>
         </TouchableOpacity>
-        <Text style={{ fontWeight: "700" }}>{label || url}</Text>
+        <Text style={{ color: C.textStrong, fontWeight: "700" }}>{label || url}</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           {queuedCount > 0 && (
-            <View style={{ backgroundColor: '#0a7ea4', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, marginRight: 10 }}>
-              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Queued: {queuedCount}</Text>
+            <View style={{ backgroundColor: C.primary, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, marginRight: 10 }}>
+              <Text style={{ color: C.textOnPrimary, fontWeight: '700', fontSize: 12 }}>Queued: {queuedCount}</Text>
             </View>
           )}
           <TouchableOpacity onPress={() => router.push("/offline")}>
-            <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Offline</Text>
+            <Text style={{ color: C.primary, fontWeight: "700" }}>Offline</Text>
           </TouchableOpacity>
         </View>
       </View>

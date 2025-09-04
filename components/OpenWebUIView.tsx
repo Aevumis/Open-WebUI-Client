@@ -510,6 +510,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
   const colorScheme = useColorScheme();
   const isAndroid = Platform.OS === 'android';
+  const dev = (typeof __DEV__ !== 'undefined' && __DEV__);
 
   // Mount-time visibility
   React.useEffect(() => {
@@ -758,10 +759,11 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       }
     } catch (err) {
       try {
+        logDebug('webview', 'onMessageError', { error: String(err) });
         logDebug('webview', 'raw', String(e?.nativeEvent?.data || ''));
       } catch {}
     }
-  }, [baseUrl, injectWebDrainBatch]);
+  }, [baseUrl, injectWebDrainBatch, injectWebSync, onQueueCountChange]);
 
   const injected = useMemo(() => buildInjection(baseUrl), [baseUrl]);
   const themeBootstrap = useMemo(() => buildThemeBootstrap(colorScheme as 'dark' | 'light' | null), [colorScheme]);
@@ -770,7 +772,6 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   // Keep page aware of RN connectivity so DOM fallback can enqueue when RN says offline
   React.useEffect(() => {
     try {
-      const val = online ? 'true' : 'false';
       const js = `(function(){try{ window.__owui_rnOnline = ${online ? 'true' : 'false'}; if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){ window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'rn',event:'online',online:${online ? 'true' : 'false'}})); } }catch(_){}})();`;
       webref.current?.injectJavaScript(js);
     } catch {}
@@ -778,6 +779,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
 
   // Debug: inject a theme probe to read the page's current theme-related state
   const injectThemeProbe = useCallback(() => {
+    if (!dev) return;
     try {
       const js = `(function(){try{
         var html = document.documentElement||{};
@@ -796,7 +798,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       }catch(e){ try{ window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'probe', event:'themeProbeError', message:String(e && e.message || e) })); }catch(_){} }})();`;
       webref.current?.injectJavaScript(js);
     } catch {}
-  }, []);
+  }, [dev]);
 
   // Apply device color scheme inside the WebView (helps when matchMedia doesn't reflect OS in RN WebView)
   React.useEffect(() => {
@@ -883,7 +885,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
           } else {
             Alert.alert('Downloaded', filename);
           }
-        } catch (err) {
+        } catch {
           Alert.alert('Download failed', 'Unable to download file.');
         }
       }}
