@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { FlatList, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, FlatList, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
 import { router } from "expo-router";
@@ -10,12 +10,45 @@ export default function OfflineScreen() {
   const [updatedMap, setUpdatedMap] = useState<Record<string, number>>({});
   const [hostFilter, setHostFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
+  const [initializing, setInitializing] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       const idx = await getCacheIndex();
+      const titleUpdates: Record<string, string> = {};
+      const tsUpdates: Record<string, number> = {};
+      await Promise.all(
+        idx.map(async (it) => {
+          const entry = await readCachedEntry(it.host, it.id);
+          if (entry) {
+            const t = entry.title || entry.data?.title || entry.data?.chat?.title;
+            if (t) titleUpdates[it.key] = String(t);
+            const raw = entry.data?.updated_at
+              ?? entry.data?.updatedAt
+              ?? entry.data?.chat?.timestamp
+              ?? entry.data?.created_at
+              ?? entry.data?.timestamp
+              ?? entry.capturedAt;
+            if (raw != null) {
+              let v = Number(raw);
+              if (Number.isFinite(v)) {
+                if (v < 1e12) v = v * 1000; // sec -> ms
+                tsUpdates[it.key] = v;
+              }
+            }
+          }
+        })
+      );
+      if (cancelled) return;
+      if (Object.keys(titleUpdates).length) setTitles((p) => ({ ...p, ...titleUpdates }));
+      if (Object.keys(tsUpdates).length) setUpdatedMap((p) => ({ ...p, ...tsUpdates }));
       setItems(idx);
+      setInitializing(false);
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Backfill titles for legacy items lacking title in index
@@ -104,6 +137,21 @@ export default function OfflineScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top", "bottom"]}>
+      {initializing ? (
+        <View style={{ padding: 16, gap: 12 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 4 }}>
+            <TouchableOpacity onPress={() => router.replace('/servers' as any)}>
+              <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>{"\u2039"} Back</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={{ fontSize: 18, fontWeight: "700" }}>Offline content</Text>
+          <Text style={{ color: "#666" }}>Cached conversations</Text>
+          <View style={{ alignItems: "center", justifyContent: "center", paddingVertical: 40 }}>
+            <ActivityIndicator size="small" color="#0a7ea4" />
+            <Text style={{ marginTop: 8, color: "#666" }}>Loading cached conversations…</Text>
+          </View>
+        </View>
+      ) : (
       <FlatList
         data={visibleItems}
         keyExtractor={(it) => it.key}
@@ -111,6 +159,11 @@ export default function OfflineScreen() {
         stickyHeaderIndices={[0]}
         ListHeaderComponent={
           <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#eee", backgroundColor: "#fff" }}>
+            <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
+              <TouchableOpacity onPress={() => router.replace('/servers' as any)}>
+                <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>{"\u2039"} Back</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={{ fontSize: 18, fontWeight: "700" }}>Offline content</Text>
             <Text style={{ color: "#666" }}>Cached conversations</Text>
             <View style={{ marginTop: 12 }}>
@@ -160,6 +213,7 @@ export default function OfflineScreen() {
         )}
         ListEmptyComponent={<Text style={{ padding: 16, color: "#666" }}>No cached items yet.</Text>}
       />
+      )}
     </SafeAreaView>
   );
 }
