@@ -8,8 +8,8 @@ export default function RootLayout() {
   setLogConfig({
     level: typeof __DEV__ !== 'undefined' && __DEV__ ? 'debug' : 'info',
     scopes: (typeof __DEV__ !== 'undefined' && __DEV__)
-      ? ['webview', 'theme']
-      : ['sync'],
+      ? ['webview', 'probe', 'webviewDrain', 'outbox', 'sync', 'theme']
+      : ['sync', 'outbox'],
   });
   return (
     <SafeAreaProvider>

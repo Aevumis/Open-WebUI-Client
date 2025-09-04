@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, FlatList, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, FlatList, ScrollView, Text, TextInput, TouchableOpacity, View, useColorScheme } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
 import { router } from "expo-router";
@@ -7,6 +7,37 @@ import { useNavigation } from "@react-navigation/native";
 
 export default function OfflineScreen() {
   const navigation = useNavigation<any>();
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme === 'dark';
+  const C = isDark
+    ? {
+        bg: '#0d0f12',
+        text: '#e6e6e6',
+        muted: '#9aa4b2',
+        border: '#2a2f36',
+        separator: '#1b1f24',
+        cardBg: '#14181d',
+        inputBg: '#0f1318',
+        primary: '#0a7ea4',
+        pillBg: '#1f2937',
+        pillActiveBg: '#0a7ea4',
+        pillText: '#e6e6e6',
+        pillActiveText: '#ffffff',
+      }
+    : {
+        bg: '#ffffff',
+        text: '#111111',
+        muted: '#666666',
+        border: '#e5e5e5',
+        separator: '#eeeeee',
+        cardBg: '#ffffff',
+        inputBg: '#ffffff',
+        primary: '#0a7ea4',
+        pillBg: '#f2f2f2',
+        pillActiveBg: '#0a7ea4',
+        pillText: '#333333',
+        pillActiveText: '#ffffff',
+      };
   const [items, setItems] = useState<CacheIndexItem[]>([]);
   const [titles, setTitles] = useState<Record<string, string>>({});
   const [updatedMap, setUpdatedMap] = useState<Record<string, number>>({});
@@ -150,19 +181,19 @@ export default function OfflineScreen() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top", "bottom"]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }} edges={["top", "bottom"]}>
       {initializing ? (
         <View style={{ padding: 16, gap: 12 }}>
           <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 4 }}>
             <TouchableOpacity onPress={goBackOrServers}>
-              <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>{"\u2039"} Back</Text>
+              <Text style={{ color: C.primary, fontWeight: "700" }}>{"\u2039"} Back</Text>
             </TouchableOpacity>
           </View>
-          <Text style={{ fontSize: 18, fontWeight: "700" }}>Offline content</Text>
-          <Text style={{ color: "#666" }}>Cached conversations</Text>
+          <Text style={{ fontSize: 18, fontWeight: "700", color: C.text }}>Offline content</Text>
+          <Text style={{ color: C.muted }}>Cached conversations</Text>
           <View style={{ alignItems: "center", justifyContent: "center", paddingVertical: 40 }}>
-            <ActivityIndicator size="small" color="#0a7ea4" />
-            <Text style={{ marginTop: 8, color: "#666" }}>Loading cached conversations…</Text>
+            <ActivityIndicator size="small" color={C.primary} />
+            <Text style={{ marginTop: 8, color: C.muted }}>Loading cached conversations…</Text>
           </View>
         </View>
       ) : (
@@ -172,17 +203,20 @@ export default function OfflineScreen() {
         keyboardShouldPersistTaps="handled"
         stickyHeaderIndices={[0]}
         ListHeaderComponent={
-          <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#eee", backgroundColor: "#fff" }}>
+          <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: C.separator, backgroundColor: C.bg }}>
             <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
               <TouchableOpacity onPress={goBackOrServers}>
-                <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>{"\u2039"} Back</Text>
+                <Text style={{ color: C.primary, fontWeight: "700" }}>{"\u2039"} Back</Text>
               </TouchableOpacity>
             </View>
-            <Text style={{ fontSize: 18, fontWeight: "700" }}>Offline content</Text>
-            <Text style={{ color: "#666" }}>Cached conversations</Text>
+            <Text style={{ fontSize: 18, fontWeight: "700", color: C.text }}>Offline content</Text>
+            <Text style={{ color: C.muted }}>Cached conversations</Text>
             <View style={{ marginTop: 12 }}>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
-                {["all", ...hosts].map((h) => (
+                {[
+                  "all",
+                  ...hosts
+                ].map((h) => (
                   <TouchableOpacity
                     key={h}
                     onPress={() => setHostFilter(h)}
@@ -191,33 +225,33 @@ export default function OfflineScreen() {
                       paddingVertical: 6,
                       borderRadius: 16,
                       marginRight: 8,
-                      backgroundColor: hostFilter === h ? "#0a7ea4" : "#f2f2f2",
+                      backgroundColor: hostFilter === h ? C.pillActiveBg : C.pillBg,
                       borderWidth: hostFilter === h ? 0 : 1,
-                      borderColor: "#e5e5e5",
+                      borderColor: C.border,
                     }}
                   >
-                    <Text style={{ color: hostFilter === h ? "#fff" : "#333", fontWeight: "600" }}>{h === "all" ? "All" : h}</Text>
+                    <Text style={{ color: hostFilter === h ? C.pillActiveText : C.pillText, fontWeight: "600" }}>{h === "all" ? "All" : h}</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
-              <View style={{ borderWidth: 1, borderColor: "#e5e5e5", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
+              <View style={{ borderWidth: 1, borderColor: C.border, backgroundColor: C.inputBg, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
                 <TextInput
                   placeholder="Search by title or ID"
                   value={query}
                   onChangeText={setQuery}
-                  placeholderTextColor="#999"
-                  style={{ padding: 0 }}
+                  placeholderTextColor={C.muted}
+                  style={{ padding: 0, color: C.text }}
                 />
               </View>
             </View>
           </View>
         }
         renderItem={({ item }) => (
-          <TouchableOpacity onPress={() => open(item)} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: "#f0f0f0" }}>
-            <Text style={{ fontWeight: "700" }} numberOfLines={1}>
+          <TouchableOpacity onPress={() => open(item)} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: C.separator }}>
+            <Text style={{ fontWeight: "700", color: C.text }} numberOfLines={1}>
               {titles[item.key] || item.title || item.id}
             </Text>
-            <Text style={{ color: "#666", fontSize: 12, marginTop: 2 }}>
+            <Text style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>
               {(() => {
                 const ts = updatedMap[item.key] ?? item.lastAccess;
                 return `Last updated: ${new Date(ts).toLocaleString()}`;
@@ -225,10 +259,9 @@ export default function OfflineScreen() {
             </Text>
           </TouchableOpacity>
         )}
-        ListEmptyComponent={<Text style={{ padding: 16, color: "#666" }}>No cached items yet.</Text>}
+        ListEmptyComponent={<Text style={{ padding: 16, color: C.muted }}>No cached items yet.</Text>}
       />
       )}
     </SafeAreaView>
   );
 }
-

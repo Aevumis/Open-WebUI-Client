@@ -4,6 +4,42 @@ This document tracks issues encountered and how they were fixed, to avoid regres
 
 ---
 
+## 2025-09-04 – Stable dark mode via document-start theme bootstrap
+
+- Symptom:
+  - Dark mode flickered or applied late in the WebView, especially around initial load and navigations.
+  - Some pages started in light mode, then flipped to dark after the app finished mounting, causing a flash.
+  - `matchMedia('(prefers-color-scheme: dark)')` inside the WebView didn’t reliably reflect the React Native device scheme.
+- Root Cause:
+  - Theme setup occurred too late (post-load). Framework hydration and site theme persistence were racing the app’s theme.
+  - The site persisted `theme` in `localStorage`, which could override system preference depending on stored values (`'dark'|'light'|'system'|'auto'|null`).
+  - RN WebView environment didn’t always propagate OS scheme to `matchMedia` at page start.
+- Fix:
+  - Inject a document-start theme bootstrap inside the WebView (`buildThemeBootstrap()` in `components/OpenWebUIView.tsx`). It:
+    - Shims `window.matchMedia('(prefers-color-scheme: dark)')` to mirror RN’s `useColorScheme()`.
+    - Applies `class="dark"`, `data-theme`, and `style.colorScheme` on `<html>` immediately.
+    - Adds a `<meta name="color-scheme" content="dark light">` tag to hint UA rendering (form controls, etc.).
+    - Respects explicit user choice saved in `localStorage` (only overrides when stored theme is `null/system/auto`).
+    - Exposes `window.__owui_notifyThemeChange(isDark)` to re-assert theme on navigation or device changes.
+    - Posts a debug message `{ scope:'injection', event:'themeBootstrap' }` for verification.
+  - On RN side, re-applies theme on `useColorScheme()` changes and on navigation events via `__owui_notifyThemeChange` if present.
+  - Native screens now adopt system dark/light using `useColorScheme()` and theme-aware palettes:
+    - `app/servers.tsx` (server picker/settings)
+    - `app/offline.tsx` (offline list)
+    - `app/offline/view.tsx` (offline conversation view)
+- Changes:
+  - `components/OpenWebUIView.tsx`: Added `buildThemeBootstrap()` and included it in `injectedJavaScriptBeforeContentLoaded`; added theme probe and re-assert logic on load/nav changes.
+  - `app/_layout.tsx`: Expanded centralized logging scopes in dev to `['webview','probe','webviewDrain','outbox','sync','theme']` and prod to `['sync','outbox']`.
+  - `app/servers.tsx`, `app/offline.tsx`, `app/offline/view.tsx`: Implemented system theme palette via `useColorScheme()` and applied to backgrounds, text, borders, inputs, and pills.
+- Validation:
+  - WebView debug log shows `{ type:'debug', scope:'injection', event:'themeBootstrap' }` at document-start.
+  - `themeProbe` logs report `hasDarkClass=true`, `dataTheme='dark'`, `mqlDark=true` when device is in dark mode.
+  - No visible flash of incorrect theme during initial load or navigation.
+  - Native screens switch cleanly with OS theme.
+- Notes:
+  - If mismatches reappear, consider gating theme override strictly to `localStorage` values and re-checking any site-level CSS that toggles post-hydration.
+  - Keep logging scope `'theme'` enabled in dev to quickly verify theme state via probes.
+
 ## 2025-09-02 – Safe area overlap (status bar and home indicator)
 
 - Symptom:
