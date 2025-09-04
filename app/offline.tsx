@@ -7,6 +7,7 @@ import { router } from "expo-router";
 export default function OfflineScreen() {
   const [items, setItems] = useState<CacheIndexItem[]>([]);
   const [titles, setTitles] = useState<Record<string, string>>({});
+  const [updatedMap, setUpdatedMap] = useState<Record<string, number>>({});
   const [hostFilter, setHostFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
 
@@ -40,16 +41,57 @@ export default function OfflineScreen() {
     };
   }, [items]);
 
+  // Backfill updated_at (or best-effort) from cached JSON for display
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const updates: Record<string, number> = {};
+      await Promise.all(
+        items.map(async (it) => {
+          if (updatedMap[it.key] != null) return;
+          const entry = await readCachedEntry(it.host, it.id);
+          // Prefer updated_at from API JSON, then updatedAt, then chat.timestamp, then created_at, then top-level timestamp, then capturedAt
+          const raw = entry?.data?.updated_at
+            ?? entry?.data?.updatedAt
+            ?? entry?.data?.chat?.timestamp
+            ?? entry?.data?.created_at
+            ?? entry?.data?.timestamp
+            ?? entry?.capturedAt;
+          if (raw != null) {
+            let v = Number(raw);
+            if (Number.isFinite(v)) {
+              // Normalize seconds to ms
+              if (v < 1e12) v = v * 1000;
+              updates[it.key] = v;
+            }
+          }
+        })
+      );
+      if (!cancelled && Object.keys(updates).length) {
+        setUpdatedMap((prev) => ({ ...prev, ...updates }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [items, updatedMap]);
+
   const hosts = useMemo(() => Array.from(new Set(items.map((i) => i.host))), [items]);
   const visibleItems = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return items.filter((i) => {
+    const filtered = items.filter((i) => {
       if (hostFilter !== "all" && i.host !== hostFilter) return false;
       if (!q) return true;
       const t = (titles[i.key] || i.title || i.id).toLowerCase();
       return t.includes(q) || i.id.toLowerCase().includes(q);
     });
-  }, [items, hostFilter, query, titles]);
+    // Sort by updated_at (desc), fallback to lastAccess until loaded
+    return filtered.slice().sort((a, b) => {
+      const au = updatedMap[a.key] ?? a.lastAccess;
+      const bu = updatedMap[b.key] ?? b.lastAccess;
+      return bu - au;
+    });
+  }, [items, hostFilter, query, titles, updatedMap]);
 
   const open = async (item: CacheIndexItem) => {
     // Ensure it exists before navigating
@@ -109,7 +151,10 @@ export default function OfflineScreen() {
               {titles[item.key] || item.title || item.id}
             </Text>
             <Text style={{ color: "#666", fontSize: 12, marginTop: 2 }}>
-              Last updated: {new Date(item.lastAccess).toLocaleString()}
+              {(() => {
+                const ts = updatedMap[item.key] ?? item.lastAccess;
+                return `Last updated: ${new Date(ts).toLocaleString()}`;
+              })()}
             </Text>
           </TouchableOpacity>
         )}

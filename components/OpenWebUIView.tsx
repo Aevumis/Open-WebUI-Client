@@ -8,7 +8,8 @@ import { cacheApiResponse, type CachedEntry } from "../lib/cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
-import { useToast } from "./Toast";
+import Toast from "react-native-toast-message";
+import * as Haptics from "expo-haptics";
 
 // WebView debug logs are now gated via centralized logger scopes/levels
 
@@ -447,7 +448,6 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   const syncingRef = React.useRef(false);
   const baseUrlRef = React.useRef(baseUrl);
   React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
-  const toast = useToast();
 
   // Mount-time visibility
   React.useEffect(() => {
@@ -619,7 +619,12 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
         const remaining = await count(host);
         const token = await getToken(host);
         logInfo('webviewDrain', 'batch result', { removed: msg.successIds.length, remaining });
-        try { if (msg.successIds.length > 0) toast.show(`Sent ${msg.successIds.length} queued`, { type: 'success' }); } catch {}
+        try {
+          if (msg.successIds.length > 0) {
+            try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); } catch {}
+            Toast.show({ type: 'success', text1: `Sent ${msg.successIds.length} queued` });
+          }
+        } catch {}
         try { onQueueCountChange && onQueueCountChange(remaining); } catch {}
         if (!token && remaining > 0) {
           await injectWebDrainBatch();
@@ -651,7 +656,10 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
         await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
         const c = await count(host);
         logInfo('outbox', 'enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
-        try { toast.show('Message queued'); } catch {}
+        try {
+          try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); } catch {}
+          Toast.show({ type: 'info', text1: 'Message queued' });
+        } catch {}
         try { onQueueCountChange && onQueueCountChange(c); } catch {}
         return;
       }

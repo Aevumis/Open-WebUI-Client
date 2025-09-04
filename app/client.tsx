@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { ActivityIndicator, Alert, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -9,7 +9,8 @@ import { maybeFullSync, isFullSyncDone } from "../lib/sync";
 import { getCacheIndex } from "../lib/cache";
 import { drain, getSettings, count } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
-import { useToast } from "../components/Toast";
+import Toast from "react-native-toast-message";
+import * as Haptics from "expo-haptics";
 
 const STORAGE_KEY = "servers:list";
 
@@ -19,7 +20,6 @@ export default function ClientScreen() {
   const [label, setLabel] = useState<string | undefined>(undefined);
   const [isOnline, setIsOnline] = useState(true);
   const [queuedCount, setQueuedCount] = useState(0);
-  const toast = useToast();
 
   useEffect(() => {
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
@@ -89,7 +89,12 @@ export default function ClientScreen() {
         const dres = await drain(url);
         logInfo('outbox', 'drain result', dres);
         try { setQueuedCount(dres.remaining); } catch {}
-        try { if (dres.sent > 0) toast.show(`Sent ${dres.sent} queued`, { type: 'success' }); } catch {}
+        try {
+          if (dres.sent > 0) {
+            try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); } catch {}
+            Toast.show({ type: 'success', text1: `Sent ${dres.sent} queued` });
+          }
+        } catch {}
       } catch {}
       running = false;
     };
