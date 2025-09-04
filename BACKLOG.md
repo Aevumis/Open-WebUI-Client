@@ -7,3 +7,4 @@
 - Sync polish: incremental sync based on `updated_at` or ETag when available.
 - UI indicators: show queued/sent states in the WebView via lightweight DOM event or banner.
 - Offline send acknowledgement UX: native overlay toasts (“Message queued”, “Sent N queued”) and small “Queued: N” badge; avoid DOM mutation; implement after duplicate-send fix is verified.
+- Offline reader: support selecting among branches (multiple assistant children) in conversation detail; allow switching between alternate replies; remember last viewed branch.

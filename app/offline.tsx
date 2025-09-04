@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { FlatList, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
+import { router } from "expo-router";
 
 export default function OfflineScreen() {
   const [items, setItems] = useState<CacheIndexItem[]>([]);
@@ -14,25 +15,31 @@ export default function OfflineScreen() {
   }, []);
 
   const open = async (item: CacheIndexItem) => {
+    // Ensure it exists before navigating
     const data = await readCachedEntry(item.host, item.id);
     if (!data) return;
-    // Basic plaintext render
-    alert(JSON.stringify(data.data, null, 2).slice(0, 20000));
+    const href = `/offline/view?host=${encodeURIComponent(item.host)}&id=${encodeURIComponent(item.id)}`;
+    // Cast to any to satisfy current route typings until typegen picks up new file
+    router.push(href as any);
   };
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top", "bottom"]}>
       <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
         <Text style={{ fontSize: 18, fontWeight: "700" }}>Offline content</Text>
-        <Text style={{ color: "#666" }}>Cached conversation JSON (text only)</Text>
+        <Text style={{ color: "#666" }}>Cached conversations</Text>
       </View>
       <FlatList
         data={items}
         keyExtractor={(it) => it.key}
         renderItem={({ item }) => (
-          <TouchableOpacity onPress={() => open(item)} style={{ padding: 12, borderBottomWidth: 1, borderBottomColor: "#f0f0f0" }}>
-            <Text style={{ fontWeight: "600" }}>{item.title || item.id}</Text>
-            <Text style={{ color: "#666", fontSize: 12 }}>{item.host} • {new Date(item.lastAccess).toLocaleString()}</Text>
+          <TouchableOpacity onPress={() => open(item)} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: "#f0f0f0" }}>
+            <Text style={{ fontWeight: "700" }} numberOfLines={1}>
+              {item.title || item.id}
+            </Text>
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 2 }}>
+              {new Date(item.lastAccess).toLocaleString()}
+            </Text>
           </TouchableOpacity>
         )}
         ListEmptyComponent={<Text style={{ padding: 16, color: "#666" }}>No cached items yet.</Text>}
@@ -40,3 +47,4 @@ export default function OfflineScreen() {
     </SafeAreaView>
   );
 }
+
