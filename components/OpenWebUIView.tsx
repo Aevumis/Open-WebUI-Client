@@ -259,37 +259,87 @@ function buildInjection(baseUrl: string) {
     // Register Service Worker for offline shell + API cache (served at origin /sw.js)
     if ('serviceWorker' in navigator) {
       try { navigator.serviceWorker.register('/sw.js', { scope: '/' }); } catch (e) {}
-      // Probe availability and report to native for UX hints
+      // Probe availability and report to native for UX hints - with better timing
       (async function(){
         try {
+          // Wait for page to be more ready before testing SW
+          const isPageReady = window.location.host && window.location.host.length > 0;
+          if (!isPageReady) {
+            post({ type: 'debug', scope: 'injection', event: 'swDetectionSkipped', reason: 'pageNotReady', host: window.location.host });
+            return;
+          }
+          
+          post({ type: 'debug', scope: 'injection', event: 'swDetectionStart', host: window.location.host });
+          
           let hasSW = false;
           let method = 'regCheck';
           let status = null;
+          let swFunctional = false;
+          let error = null;
+          
           try {
-            // Prefer HEAD to avoid downloading file; fall back to GET if HEAD is blocked
+            // First check if SW file exists
             method = 'head';
             const res = await fetch('/sw.js', { method: 'HEAD', cache: 'no-store' });
             status = res && res.status;
             hasSW = !!(res && res.ok);
+            post({ type: 'debug', scope: 'injection', event: 'swFileCheck', method: 'head', status, hasSW });
+            
             if (!hasSW && (!res || status === 405 || status === 501)) {
               method = 'get';
               const res2 = await fetch('/sw.js', { method: 'GET', cache: 'no-store' });
               status = res2 && res2.status;
               hasSW = !!(res2 && res2.ok);
+              post({ type: 'debug', scope: 'injection', event: 'swFileCheck', method: 'get', status, hasSW });
             }
-          } catch (_) {}
+          } catch (e) {
+            error = String(e && e.message || e);
+            post({ type: 'debug', scope: 'injection', event: 'swFileCheckError', error });
+          }
+          
+          // Check registration status
           if (!hasSW) {
             try {
               const reg = await (navigator.serviceWorker.getRegistration ? navigator.serviceWorker.getRegistration() : Promise.resolve(null));
-              hasSW = !!reg;
-            } catch (_) {}
+              const regActive = !!(reg && reg.active);
+              hasSW = regActive;
+              if (hasSW) method = 'registration';
+              post({ type: 'debug', scope: 'injection', event: 'swRegistrationCheck', hasRegistration: !!reg, hasActive: regActive, hasSW });
+            } catch (e) {
+              post({ type: 'debug', scope: 'injection', event: 'swRegistrationError', error: String(e && e.message || e) });
+            }
           }
-          try { post({ type: 'swStatus', hasSW, method, status }); } catch(_){}
-        } catch (_) {}
+          
+          // Test if SW is actually functional (only if we think it exists)
+          if (hasSW) {
+            try {
+              // Wait a bit for SW to be ready, then test functionality
+              await new Promise(r => setTimeout(r, 1000));
+              const testRes = await fetch('/sw.js', { 
+                method: 'GET', 
+                cache: 'no-store',
+                headers: { 'x-sw-test': 'functional-check' }
+              });
+              swFunctional = !!(testRes && testRes.ok);
+              post({ type: 'debug', scope: 'injection', event: 'swFunctionalTest', swFunctional, status: testRes && testRes.status });
+            } catch (e) {
+              swFunctional = false;
+              post({ type: 'debug', scope: 'injection', event: 'swFunctionalError', error: String(e && e.message || e) });
+            }
+          }
+          
+          post({ type: 'debug', scope: 'injection', event: 'swDetectionComplete', hasSW, swFunctional, method, status, error });
+          try { post({ type: 'swStatus', hasSW, swFunctional, method, status, error }); } catch(_){}
+        } catch (e) {
+          post({ type: 'debug', scope: 'injection', event: 'swDetectionFailed', error: String(e && e.message || e) });
+        }
       })();
     }
     else {
-      try { post({ type: 'swStatus', hasSW: false, method: 'unsupported' }); } catch(_){}
+      try { 
+        post({ type: 'debug', scope: 'injection', event: 'swUnsupported' });
+        post({ type: 'swStatus', hasSW: false, method: 'unsupported' }); 
+      } catch(_){}
     }
 
     function shouldCache(url) {
@@ -712,17 +762,78 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
         logInfo('webview', 'swStatus', msg);
         try {
           const key = `swhint:${host}`;
-          const shown = await AsyncStorage.getItem(key);
-          if (!msg.hasSW && shown !== '1') {
-            await AsyncStorage.setItem(key, '1');
+          const pendingKey = `${key}:pending`;
+          const shownCount = parseInt(await AsyncStorage.getItem(key) || '0');
+          
+          // If this is an "unsupported" detection (early timing issue), delay the warning
+          if (msg.method === 'unsupported') {
+            const existingPending = await AsyncStorage.getItem(pendingKey);
+            if (!existingPending) {
+              await AsyncStorage.setItem(pendingKey, String(Date.now()));
+              logInfo('webview', 'swUnsupportedPending', { host, delayingWarning: true });
+              
+              // Wait 3 seconds, then check if we got a better detection
+              setTimeout(async () => {
+                try {
+                  const stillPending = await AsyncStorage.getItem(pendingKey);
+                  if (stillPending) {
+                    // No better detection came in, show the warning
+                    await AsyncStorage.removeItem(pendingKey);
+                    const currentCount = parseInt(await AsyncStorage.getItem(key) || '0');
+                    if (currentCount < 2) {
+                      await AsyncStorage.setItem(key, String(currentCount + 1));
+                      Toast.show({
+                        type: 'info',
+                        text1: 'Service Worker not supported',
+                        text2: 'Your browser may not support Service Workers. Tap to learn more.',
+                        onPress: async () => {
+                          try { await WebBrowser.openBrowserAsync('https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw'); } catch {}
+                        },
+                      });
+                      logInfo('webview', 'swDelayedWarningShown', { host, method: 'unsupported', shownCount: currentCount + 1 });
+                    }
+                  }
+                } catch {}
+              }, 3000);
+            }
+            return;
+          }
+          
+          // Clear any pending unsupported warning since we got a real detection
+          await AsyncStorage.removeItem(pendingKey);
+          
+          // Only show toast if:
+          // 1. SW file doesn't exist OR SW exists but isn't functional
+          // 2. Haven't shown this warning more than 2 times for this host
+          // 3. Give preference to functional check over file existence
+          const shouldWarn = (!msg.hasSW || (msg.hasSW && msg.swFunctional === false)) && shownCount < 2;
+          
+          if (shouldWarn) {
+            await AsyncStorage.setItem(key, String(shownCount + 1));
+            const warningText = !msg.hasSW 
+              ? 'Service Worker not found on server'
+              : 'Service Worker found but not working properly';
+            
             Toast.show({
               type: 'info',
-              text1: 'Offline inside WebView is not enabled',
-              text2: 'Tap to learn how to enable the Service Worker for this server.',
+              text1: 'Offline mode not fully enabled',
+              text2: `${warningText}. Tap to learn more.`,
               onPress: async () => {
                 try { await WebBrowser.openBrowserAsync('https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw'); } catch {}
               },
             });
+            
+            logInfo('webview', 'swWarningShown', { 
+              host, 
+              hasSW: msg.hasSW, 
+              swFunctional: msg.swFunctional, 
+              method: msg.method, 
+              shownCount: shownCount + 1 
+            });
+          } else if (msg.hasSW && msg.swFunctional !== false) {
+            // SW appears to be working, clear any previous warning count
+            await AsyncStorage.removeItem(key);
+            logInfo('webview', 'swWorking', { host, method: msg.method });
           }
         } catch {}
         return;
