@@ -8,7 +8,17 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "build": "./scripts/build.sh",
+    "build:dev": "./scripts/build.sh -p development -l",
+    "build:dev:cloud": "./scripts/build.sh -p development",
+    "build:preview": "./scripts/build.sh -p preview -l",
+    "build:preview:cloud": "./scripts/build.sh -p preview",
+    "build:prod": "./scripts/build.sh -p production",
+    "build:prod:apk": "./scripts/build.sh -p production-apk",
+    "build:clean": "./scripts/build.sh -p development -l -c",
+    "credentials": "eas credentials",
+    "credentials:android": "eas credentials --platform android"
   },
   "dependencies": {
     "@expo/vector-icons": "^14.1.0",

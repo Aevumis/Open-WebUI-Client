@@ -1,0 +1,168 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Build profile'
+        required: true
+        default: 'preview'
+        type: choice
+        options:
+        - development
+        - preview
+        - production
+        - production-apk
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 🏗 Setup repo
+      uses: actions/checkout@v4
+
+    - name: 🏗 Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18.x
+        cache: npm
+
+    - name: 🏗 Setup EAS
+      uses: expo/expo-github-action@v8
+      with:
+        eas-version: latest
+        token: ${{ secrets.EXPO_TOKEN }}
+
+    - name: 📦 Install dependencies
+      run: npm ci
+
+    - name: 🚀 Build app
+      run: |
+        # Determine build profile
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          PROFILE="${{ github.event.inputs.profile }}"
+        elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          PROFILE="production"
+        else
+          PROFILE="preview"
+        fi
+        
+        echo "Building with profile: $PROFILE"
+        eas build --platform android --profile $PROFILE --non-interactive --no-wait
+        
+        # Get build ID and wait for completion
+        BUILD_ID=$(eas build:list --platform android --status in-progress --limit 1 --json | jq -r '.[0].id')
+        echo "Build ID: $BUILD_ID"
+        echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+        
+        # Wait for build completion (max 30 minutes)
+        timeout 1800 bash -c "
+          while true; do
+            STATUS=\$(eas build:list --platform android --limit 1 --json | jq -r '.[0].status')
+            echo \"Build status: \$STATUS\"
+            if [ \"\$STATUS\" = \"finished\" ]; then
+              echo \"Build completed successfully\"
+              break
+            elif [ \"\$STATUS\" = \"errored\" ] || [ \"\$STATUS\" = \"canceled\" ]; then
+              echo \"Build failed with status: \$STATUS\"
+              exit 1
+            fi
+            sleep 30
+          done
+        "
+      id: build
+
+    - name: 📱 Download APK
+      if: success()
+      run: |
+        # Download the built APK
+        eas build:download ${{ steps.build.outputs.build_id }} --output ./app-build.apk
+        
+        # Get build info
+        BUILD_INFO=$(eas build:list --platform android --limit 1 --json)
+        echo "BUILD_INFO<<EOF" >> $GITHUB_ENV
+        echo "$BUILD_INFO" >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
+
+    - name: 📊 Build Summary
+      if: success()
+      run: |
+        echo "## 🚀 Build Completed Successfully" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Profile:** ${{ github.event.inputs.profile || 'auto-detected' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Platform:** Android" >> $GITHUB_STEP_SUMMARY
+        echo "**Build ID:** ${{ steps.build.outputs.build_id }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Get APK size
+        if [ -f "./app-build.apk" ]; then
+          APK_SIZE=$(du -h ./app-build.apk | cut -f1)
+          echo "**APK Size:** $APK_SIZE" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: 📦 Upload APK Artifact
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-apk-${{ github.run_number }}
+        path: ./app-build.apk
+        retention-days: 30
+
+    - name: 💬 Comment PR
+      if: github.event_name == 'pull_request' && success()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const apkSize = fs.existsSync('./app-build.apk') 
+            ? require('child_process').execSync('du -h ./app-build.apk').toString().split('\t')[0]
+            : 'Unknown';
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 📱 Android Build Ready
+            
+**Build completed successfully!**
+- **Profile:** Preview
+- **APK Size:** ${apkSize}
+- **Download:** Check the "Artifacts" section in this workflow run
+- **Build ID:** ${{ steps.build.outputs.build_id }}
+
+You can download and test the APK from the workflow artifacts.`
+          });
+
+  notify-failure:
+    name: Notify Build Failure
+    runs-on: ubuntu-latest
+    needs: build
+    if: failure()
+    
+    steps:
+    - name: 💬 Comment PR on Failure
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## ❌ Android Build Failed
+            
+The Android build failed for this PR. Please check the workflow logs for details.
+
+**Build Details:**
+- **Commit:** ${{ github.sha }}
+- **Workflow:** [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+Please fix the issues and push again to trigger a new build.`
+          });
