@@ -51,9 +51,9 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Check Expo CLI
-    if ! command -v expo &> /dev/null; then
-        print_error "Expo CLI is not installed. Run: npm install -g @expo/cli"
+    # Check Expo CLI (prefer npx over global install)
+    if ! command -v expo &> /dev/null && ! npx expo --version &> /dev/null; then
+        print_error "Expo CLI is not available. Run: npm install -g @expo/cli or ensure npx is working"
         exit 1
     fi
     
@@ -119,6 +119,21 @@ build_app() {
     
     print_status "Building app with profile: $profile, platform: $platform"
     
+    # Set NODE_ENV based on profile
+    case $profile in
+        development)
+            export NODE_ENV=development
+            ;;
+        preview)
+            export NODE_ENV=production
+            ;;
+        production|production-apk)
+            export NODE_ENV=production
+            ;;
+    esac
+    
+    print_status "NODE_ENV set to: $NODE_ENV"
+    
     # Build command
     local build_cmd="eas build --profile $profile --platform $platform"
     
@@ -167,6 +182,8 @@ clean_cache() {
     # Clean Expo cache
     if command -v expo &> /dev/null; then
         expo r -c
+    elif npx expo --version &> /dev/null; then
+        npx expo r -c
     fi
     
     # Clean npm cache
