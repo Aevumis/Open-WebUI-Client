@@ -4,6 +4,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
 import { router } from "expo-router";
 import { useNavigation } from "@react-navigation/native";
+import { isFullSyncDone } from "../lib/sync";
+import { getSettings } from "../lib/outbox";
 
 export default function OfflineScreen() {
   const navigation = useNavigation<any>();
@@ -44,6 +46,7 @@ export default function OfflineScreen() {
   const [hostFilter, setHostFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
   const [initializing, setInitializing] = useState(true);
+  const [syncInfo, setSyncInfo] = useState<{host: string, syncDone: boolean, syncEnabled: boolean} | null>(null);
 
   const goBackOrServers = () => {
     try {
@@ -89,6 +92,28 @@ export default function OfflineScreen() {
       if (Object.keys(titleUpdates).length) setTitles((p) => ({ ...p, ...titleUpdates }));
       if (Object.keys(tsUpdates).length) setUpdatedMap((p) => ({ ...p, ...tsUpdates }));
       setItems(idx);
+      
+      // Check sync status for empty state messaging
+      if (idx.length === 0) {
+        try {
+          // Get the most recent server from storage to check sync status
+          const serversRaw = await import('@react-native-async-storage/async-storage').then(m => m.default.getItem('servers:list'));
+          const activeRaw = await import('@react-native-async-storage/async-storage').then(m => m.default.getItem('servers:active'));
+          if (serversRaw && activeRaw) {
+            const servers = JSON.parse(serversRaw);
+            const activeServer = servers.find((s: any) => s.id === activeRaw);
+            if (activeServer) {
+              const host = new URL(activeServer.url).host;
+              const syncDone = await isFullSyncDone(activeServer.url);
+              const settings = await getSettings(host);
+              setSyncInfo({ host, syncDone, syncEnabled: settings.fullSyncOnLoad });
+            }
+          }
+        } catch {
+          // Ignore errors in sync status check
+        }
+      }
+      
       setInitializing(false);
     })();
     return () => {
@@ -259,7 +284,39 @@ export default function OfflineScreen() {
             </Text>
           </TouchableOpacity>
         )}
-        ListEmptyComponent={<Text style={{ padding: 16, color: C.muted }}>No cached items yet.</Text>}
+        ListEmptyComponent={
+          <View style={{ padding: 16, alignItems: 'center' }}>
+            <Text style={{ color: C.muted, textAlign: 'center', marginBottom: 12 }}>No cached conversations yet.</Text>
+            {syncInfo && (
+              <View style={{ alignItems: 'center' }}>
+                {!syncInfo.syncEnabled ? (
+                  <View style={{ alignItems: 'center' }}>
+                    <Text style={{ color: C.muted, textAlign: 'center', fontSize: 14 }}>
+                      Sync is disabled for this server.
+                    </Text>
+                    <Text style={{ color: C.muted, textAlign: 'center', fontSize: 14, marginTop: 4 }}>
+                      Enable &quot;Full sync on app load&quot; in server settings to cache conversations.
+                    </Text>
+                  </View>
+                ) : !syncInfo.syncDone ? (
+                  <View style={{ alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color={C.primary} style={{ marginBottom: 8 }} />
+                    <Text style={{ color: C.primary, textAlign: 'center', fontSize: 14, fontWeight: '600' }}>
+                      Initial sync in progress...
+                    </Text>
+                    <Text style={{ color: C.muted, textAlign: 'center', fontSize: 12, marginTop: 4 }}>
+                      Downloading conversations from {syncInfo.host}
+                    </Text>
+                  </View>
+                ) : (
+                  <Text style={{ color: C.muted, textAlign: 'center', fontSize: 14 }}>
+                    Sync completed but no conversations found on {syncInfo.host}
+                  </Text>
+                )}
+              </View>
+            )}
+          </View>
+        }
       />
       )}
     </SafeAreaView>

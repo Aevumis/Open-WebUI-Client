@@ -20,6 +20,7 @@ export default function ClientScreen() {
   const [label, setLabel] = useState<string | undefined>(undefined);
   const [isOnline, setIsOnline] = useState(true);
   const [queuedCount, setQueuedCount] = useState(0);
+  const [syncStatus, setSyncStatus] = useState<'checking' | 'syncing' | 'done' | 'disabled'>('checking');
   const scheme = useColorScheme();
   const C = scheme === 'dark'
     ? {
@@ -89,18 +90,26 @@ export default function ClientScreen() {
         const host = new URL(url).host;
         const settings = await getSettings(host);
         if (settings.fullSyncOnLoad) {
-          logInfo('sync', 'maybeFullSync start');
-          const res = await maybeFullSync(url);
-          if (res) {
-            logInfo('sync', 'fullSync result', res);
-            try {
-              const idx = await getCacheIndex();
-              const count = idx.filter(it => it.host === host).length;
-              logInfo('cache', 'index count for host', { host, count });
-            } catch {}
+          const done = await isFullSyncDone(url);
+          if (done) {
+            setSyncStatus('done');
+          } else {
+            setSyncStatus('syncing');
+            logInfo('sync', 'maybeFullSync start');
+            const res = await maybeFullSync(url);
+            if (res) {
+              logInfo('sync', 'fullSync result', res);
+              setSyncStatus('done');
+              try {
+                const idx = await getCacheIndex();
+                const count = idx.filter(it => it.host === host).length;
+                logInfo('cache', 'index count for host', { host, count });
+              } catch {}
+            }
+            logInfo('sync', 'maybeFullSync done');
           }
-          logInfo('sync', 'maybeFullSync done');
         } else {
+          setSyncStatus('disabled');
           logInfo('sync', 'fullSyncOnLoad disabled, skip maybeFullSync');
         }
       } catch {}
@@ -134,6 +143,7 @@ export default function ClientScreen() {
         }
         const done = await isFullSyncDone(url);
         if (done) {
+          setSyncStatus('done');
           logInfo('sync', 'fullSync already done, stopping retries');
           clearInterval(timer);
           return;
@@ -162,6 +172,12 @@ export default function ClientScreen() {
         </TouchableOpacity>
         <Text style={{ color: C.textStrong, fontWeight: "700" }}>{label || url}</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {syncStatus === 'syncing' && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: 10 }}>
+              <ActivityIndicator size="small" color={C.primary} style={{ marginRight: 4 }} />
+              <Text style={{ color: C.primary, fontWeight: '600', fontSize: 12 }}>Syncing...</Text>
+            </View>
+          )}
           {queuedCount > 0 && (
             <View style={{ backgroundColor: C.primary, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, marginRight: 10 }}>
               <Text style={{ color: C.textOnPrimary, fontWeight: '700', fontSize: 12 }}>Queued: {queuedCount}</Text>
