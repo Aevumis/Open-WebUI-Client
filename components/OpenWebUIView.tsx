@@ -920,6 +920,17 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       geolocationEnabled // Android
       javaScriptEnabled
       domStorageEnabled
+      mediaPlaybackRequiresUserAction={false}
+      allowsInlineMediaPlayback
+      onPermissionRequest={(request) => {
+        // Grant microphone and camera permissions for WebRTC features
+        if (request.nativeEvent.resources.includes('microphone') || 
+            request.nativeEvent.resources.includes('camera')) {
+          request.nativeEvent.grant();
+        } else {
+          request.nativeEvent.deny();
+        }
+      }}
       // Encourage Android to respect dark theme at the rendering layer (in addition to page CSS)
       forceDarkOn={isAndroid && colorScheme === 'dark'}
       onFileDownload={async (e) => {
