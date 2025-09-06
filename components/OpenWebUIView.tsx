@@ -4,6 +4,8 @@ import WebView, { WebViewMessageEvent } from "react-native-webview";
 import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
+import { Camera } from "expo-camera";
+import * as MediaLibrary from "expo-media-library";
 import { cacheApiResponse, type CachedEntry } from "../lib/cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
@@ -593,10 +595,35 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   const isAndroid = Platform.OS === 'android';
   const dev = (typeof __DEV__ !== 'undefined' && __DEV__);
 
-  // Mount-time visibility
+  // Mount-time visibility and permission setup
   React.useEffect(() => {
     try {
       logInfo('webview', 'mount', { baseUrl });
+      
+      // Proactively request camera and microphone permissions on mount
+      // This ensures permissions are available when the WebView needs them
+      (async () => {
+        try {
+          const cameraPermission = await Camera.requestCameraPermissionsAsync();
+          const microphonePermission = await Camera.requestMicrophonePermissionsAsync();
+          
+          logInfo('permissions', 'proactive permission request', {
+            camera: cameraPermission.status,
+            microphone: microphonePermission.status
+          });
+          
+          if (cameraPermission.status !== 'granted' || microphonePermission.status !== 'granted') {
+            Toast.show({
+              type: 'info',
+              text1: 'Camera/Microphone Access',
+              text2: 'Some features may require camera and microphone permissions.',
+              visibilityTime: 4000,
+            });
+          }
+        } catch (error) {
+          logDebug('permissions', 'proactive request error', { error: String(error) });
+        }
+      })();
     } catch {}
   }, [baseUrl]);
 
@@ -1033,15 +1060,56 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       domStorageEnabled
       mediaPlaybackRequiresUserAction={false}
       allowsInlineMediaPlayback
-      onPermissionRequest={(request) => {
-        // Grant microphone and camera permissions for WebRTC features
-        if (request.nativeEvent.resources.includes('microphone') || 
-            request.nativeEvent.resources.includes('camera')) {
-          request.nativeEvent.grant();
-        } else {
-          request.nativeEvent.deny();
+      {...(Platform.OS === 'android' && {
+        onPermissionRequest: async (request: any) => {
+          try {
+            const resources = request.nativeEvent.resources;
+            logDebug('webview', 'permission request', { resources });
+            
+            // Check if camera permission is requested
+            if (resources.includes('camera')) {
+              const { status } = await Camera.requestCameraPermissionsAsync();
+              logInfo('permissions', 'camera permission result', { status });
+              
+              if (status === 'granted') {
+                request.nativeEvent.grant();
+              } else {
+                request.nativeEvent.deny();
+                Toast.show({
+                  type: 'error',
+                  text1: 'Camera Permission Required',
+                  text2: 'Please enable camera access in Settings to use this feature.',
+                });
+              }
+              return;
+            }
+            
+            // Check if microphone permission is requested
+            if (resources.includes('microphone')) {
+              const { status } = await Camera.requestMicrophonePermissionsAsync();
+              logInfo('permissions', 'microphone permission result', { status });
+              
+              if (status === 'granted') {
+                request.nativeEvent.grant();
+              } else {
+                request.nativeEvent.deny();
+                Toast.show({
+                  type: 'error',
+                  text1: 'Microphone Permission Required',
+                  text2: 'Please enable microphone access in Settings to use this feature.',
+                });
+              }
+              return;
+            }
+            
+            // For other permissions, deny by default
+            request.nativeEvent.deny();
+          } catch (error) {
+            logDebug('webview', 'permission request error', { error: String(error) });
+            request.nativeEvent.deny();
+          }
         }
-      }}
+      })}
       // Encourage Android to respect dark theme at the rendering layer (in addition to page CSS)
       forceDarkOn={isAndroid && colorScheme === 'dark'}
       onFileDownload={async (e) => {
