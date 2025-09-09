@@ -102,3 +102,40 @@ curl -I https://<your-domain>/offline.html
 - In-WebView offline browsing: Not available (no offline shell or cached assets without the SW)
 
 When the app detects that `/sw.js` is not present on a server you open, it will show a one-time hint with a link to the docs above.
+
+## Install
+
+Download official builds from GitHub Releases:
+
+- Releases: https://github.com/Aevumis/Open-WebUI-Client/releases
+
+Assets you will typically find per release:
+
+- `Open-WebUI-Client-<version>-android.apk` — Android APK for sideloading
+- `Open-WebUI-Client-<version>-ios.ipa` — iOS IPA for internal/sideload testing (advanced users)
+- `SHA256SUMS.txt` — checksums for the above assets
+
+Platform-specific install notes:
+
+### Android
+- Download the `.apk` from the release
+- On your device, enable "Install from unknown sources"
+- Tap the APK to install, or use ADB: `adb install Open-WebUI-Client-<version>-android.apk`
+
+### iOS
+- Preferred: TestFlight public link (when available) will be listed in the release notes
+- Advanced users: The `.ipa` asset can be sideloaded via tools like AltStore or re-signed for development use. Note that raw `.ipa` files are not installable by the general public without appropriate provisioning or sideloading tools.
+
+## Releases & Changelog
+
+- All releases are tagged (e.g., `v1.0.0`) and published on GitHub Releases with downloadable assets.
+- See `CHANGELOG.md` for a summary of changes per version. The changelog is updated automatically as part of the release process.
+
+## Branding & Trademark Notice
+
+This project is an independent, community-built client for Open WebUI.
+
+- We are not affiliated with, endorsed by, or sponsored by the Open WebUI project or its maintainers.
+- "Open WebUI" and any associated logos or marks are the property of their respective owners. We do not claim ownership of these trademarks or branding.
+- The name is used solely to help users understand interoperability with the Open WebUI project.
+- We are happy to rename/rebrand this client if requested by the Open WebUI project to avoid any potential confusion. No trademark or branding rights are intended to be infringed.

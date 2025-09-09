@@ -1,7 +1,7 @@
 {
   "cli": {
     "version": ">= 16.18.0",
-    "appVersionSource": "remote"
+    "appVersionSource": "local"
   },
   "build": {
     "development": {
@@ -27,6 +27,11 @@
       "extends": "production",
       "android": {
         "buildType": "apk"
+      }
+    },
+    "ios-internal": {
+      "ios": {
+        "distribution": "internal"
       }
     }
   },
