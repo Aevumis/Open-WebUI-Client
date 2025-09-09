@@ -59,48 +59,35 @@ jobs:
         fi
         
         echo "Building with profile: $PROFILE"
-        eas build --platform android --profile $PROFILE --non-interactive --no-wait
-        
-        # Get build ID and wait for completion
-        BUILD_ID=$(eas build:list --platform android --status in-progress --limit 1 --json | jq -r '.[0].id')
-        echo "Build ID: $BUILD_ID"
-        echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-        
-        # Wait for build completion (max 30 minutes)
-        timeout 1800 bash -c "
-          while true; do
-            STATUS=\$(eas build:list --platform android --limit 1 --json | jq -r '.[0].status')
-            echo \"Build status: \$STATUS\"
-            if [ \"\$STATUS\" = \"finished\" ]; then
-              echo \"Build completed successfully\"
-              break
-            elif [ \"\$STATUS\" = \"errored\" ] || [ \"\$STATUS\" = \"canceled\" ]; then
-              echo \"Build failed with status: \$STATUS\"
-              exit 1
-            fi
-            sleep 30
-          done
-        "
+        echo "PROFILE=$PROFILE" >> $GITHUB_ENV
+        # Start build and wait for completion; capture JSON result
+        eas build --platform android --profile "$PROFILE" --non-interactive --wait --json > build.json
+        echo "EAS build finished. Captured output to build.json"
+        # Parse build id from either array or object shape
+        BUILD_ID=$(jq -r '.[0].id // .id // empty' build.json)
+        echo "Build ID: ${BUILD_ID}"
+        echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
       id: build
 
     - name: 📱 Download APK
       if: success()
       run: |
-        # Download the built APK
-        eas build:download ${{ steps.build.outputs.build_id }} --output ./app-build.apk
-        
-        # Get build info
-        BUILD_INFO=$(eas build:list --platform android --limit 1 --json)
-        echo "BUILD_INFO<<EOF" >> $GITHUB_ENV
-        echo "$BUILD_INFO" >> $GITHUB_ENV
-        echo "EOF" >> $GITHUB_ENV
+        # Download the built APK using the captured id if available, else fallback to latest
+        if [ -f build.json ]; then
+          ID=$(jq -r '.[0].id // .id // empty' build.json)
+        fi
+        if [ -n "$ID" ]; then
+          eas build:download --platform android --id "$ID" --output ./app-build.apk
+        else
+          eas build:download --platform android --latest --output ./app-build.apk
+        fi
 
     - name: 📊 Build Summary
       if: success()
       run: |
         echo "## 🚀 Build Completed Successfully" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Profile:** ${{ github.event.inputs.profile || 'auto-detected' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Profile:** ${PROFILE:-auto-detected}" >> $GITHUB_STEP_SUMMARY
         echo "**Platform:** Android" >> $GITHUB_STEP_SUMMARY
         echo "**Build ID:** ${{ steps.build.outputs.build_id }}" >> $GITHUB_STEP_SUMMARY
         echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
@@ -125,6 +112,7 @@ jobs:
       uses: actions/github-script@v7
       env:
         BUILD_ID: ${{ steps.build.outputs.build_id }}
+        PROFILE: ${{ env.PROFILE }}
       with:
         script: |
           const fs = require('fs');
@@ -135,7 +123,7 @@ jobs:
             '## 📱 Android Build Ready',
             '',
             '**Build completed successfully!**',
-            '- **Profile:** Preview',
+            `- **Profile:** ${process.env.PROFILE || 'auto-detected'}`,
             `- **APK Size:** ${apkSize}`,
             '- **Download:** Check the "Artifacts" section in this workflow run',
             `- **Build ID:** ${process.env.BUILD_ID}`,
