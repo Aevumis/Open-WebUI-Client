@@ -88,7 +88,14 @@ jobs:
       - name: 📥 Download Android APK
         run: |
           FNAME="Open-WebUI-Client-${VERSION}-android.apk"
-          eas build:download --platform android --id "$ANDROID_BUILD_ID" --output "$FNAME"
+          echo "Resolving Android artifact URL for $ANDROID_BUILD_ID"
+          eas build:view --non-interactive --json --id "$ANDROID_BUILD_ID" > android_view.json
+          URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' android_view.json)
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "Could not resolve Android artifact URL from android_view.json" && cat android_view.json && exit 1
+          fi
+          echo "Downloading $URL -> $FNAME"
+          curl -L "$URL" -o "$FNAME"
           echo "ANDROID_APK=$FNAME" >> $GITHUB_ENV
 
       - name: 🏗️ Build iOS (ios-internal)
@@ -102,7 +109,14 @@ jobs:
       - name: 📥 Download iOS IPA
         run: |
           FNAME="Open-WebUI-Client-${VERSION}-ios.ipa"
-          eas build:download --platform ios --id "$IOS_BUILD_ID" --output "$FNAME"
+          echo "Resolving iOS artifact URL for $IOS_BUILD_ID"
+          eas build:view --non-interactive --json --id "$IOS_BUILD_ID" > ios_view.json
+          URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' ios_view.json)
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "Could not resolve iOS artifact URL from ios_view.json" && cat ios_view.json && exit 1
+          fi
+          echo "Downloading $URL -> $FNAME"
+          curl -L "$URL" -o "$FNAME"
           echo "IOS_IPA=$FNAME" >> $GITHUB_ENV
 
       - name: 🚀 Submit iOS to TestFlight (optional)

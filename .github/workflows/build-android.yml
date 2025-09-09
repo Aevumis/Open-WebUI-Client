@@ -72,15 +72,25 @@ jobs:
     - name: 📱 Download APK
       if: success()
       run: |
-        # Download the built APK using the captured id if available, else fallback to latest
+        # Resolve artifact URL and download APK
+        ID=""
         if [ -f build.json ]; then
           ID=$(jq -r '.[0].id // .id // empty' build.json)
         fi
-        if [ -n "$ID" ]; then
-          eas build:download --platform android --id "$ID" --output ./app-build.apk
-        else
-          eas build:download --platform android --latest --output ./app-build.apk
+        if [ -z "$ID" ]; then
+          echo "No build ID found in build.json; cannot download."
+          exit 1
         fi
+        echo "Fetching build details for $ID"
+        eas build:view --non-interactive --json --id "$ID" > build_view.json
+        URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' build_view.json)
+        if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+          echo "Could not resolve artifact URL from build_view.json"
+          cat build_view.json
+          exit 1
+        fi
+        echo "Resolved artifact URL: $URL"
+        curl -L "$URL" -o ./app-build.apk
 
     - name: 📊 Build Summary
       if: success()
