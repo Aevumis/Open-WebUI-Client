@@ -83,17 +83,34 @@ jobs:
         fi
         
         echo "Fetching build details for $ID"
+        # Check available flags first
+        echo "Checking eas build:view help:"
+        eas build:view --help || true
+        
         # Add retry logic for build:view command
         for i in {1..3}; do
           echo "Attempt $i to fetch build details..."
-          if eas build:view "$ID" --non-interactive --json > build_view.json 2>&1; then
+          # Try different command variations
+          if eas build:view "$ID" > build_view.json 2>&1; then
             echo "Successfully fetched build details"
+            break
+          elif eas build:list --json --limit=1 --build-id="$ID" > build_view.json 2>&1; then
+            echo "Successfully fetched build details using build:list"
             break
           else
             echo "Failed to fetch build details (attempt $i)"
             if [ $i -eq 3 ]; then
               echo "All attempts failed. Build view output:"
               cat build_view.json || echo "No build_view.json file created"
+              echo "Trying to get build info via API..."
+              # Try direct API call as fallback
+              curl -H "Authorization: Bearer $EXPO_TOKEN" \
+                   -H "Accept: application/json" \
+                   "https://api.expo.dev/v2/builds/$ID" > build_view.json 2>&1 || true
+              if [ -s build_view.json ]; then
+                echo "Got build info via API"
+                break
+              fi
               exit 1
             fi
             sleep 10
@@ -109,7 +126,8 @@ jobs:
         echo "Build view content:"
         cat build_view.json
         
-        URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' build_view.json)
+        # Try different JSON paths for the artifact URL
+        URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // .data.artifacts.buildUrl // .data.artifacts.applicationArchiveUrl // .data.artifacts.appBuildUrl // empty' build_view.json)
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
           echo "Could not resolve artifact URL from build_view.json"
           echo "Available fields in artifacts:"
