@@ -91,11 +91,19 @@ jobs:
         for i in {1..3}; do
           echo "Attempt $i to fetch build details..."
           # Try different command variations
-          if eas build:view "$ID" > build_view.json 2>&1; then
+          if eas build:view "$ID" --json > build_view.json 2>&1; then
             echo "Successfully fetched build details"
             break
-          elif eas build:list --json --limit=1 --build-id="$ID" > build_view.json 2>&1; then
-            echo "Successfully fetched build details using build:list"
+          elif eas build:view "$ID" > build_view_text.txt 2>&1; then
+            echo "Successfully fetched build details in text format"
+            # Parse the artifact URL from text output
+            ARTIFACT_LINE=$(grep "^Artifact" build_view_text.txt || echo "")
+            if [ -n "$ARTIFACT_LINE" ]; then
+              URL=$(echo "$ARTIFACT_LINE" | awk '{print $2}')
+              echo "Extracted artifact URL from text: $URL"
+              # Create a simple JSON structure for consistency
+              echo "{\"artifacts\":{\"buildUrl\":\"$URL\"}}" > build_view.json
+            fi
             break
           else
             echo "Failed to fetch build details (attempt $i)"
@@ -127,11 +135,23 @@ jobs:
         cat build_view.json
         
         # Try different JSON paths for the artifact URL
-        URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // .data.artifacts.buildUrl // .data.artifacts.applicationArchiveUrl // .data.artifacts.appBuildUrl // empty' build_view.json)
+        URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // .data.artifacts.buildUrl // .data.artifacts.applicationArchiveUrl // .data.artifacts.appBuildUrl // empty' build_view.json 2>/dev/null)
+        
+        # If JSON parsing failed, try to extract URL from text output
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-          echo "Could not resolve artifact URL from build_view.json"
-          echo "Available fields in artifacts:"
-          jq -r '.artifacts // empty' build_view.json
+          echo "JSON parsing failed, trying to extract URL from text output..."
+          if [ -f "build_view_text.txt" ]; then
+            URL=$(grep "^Artifact" build_view_text.txt | awk '{print $2}' || echo "")
+            echo "Extracted URL from text: $URL"
+          fi
+        fi
+        
+        if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+          echo "Could not resolve artifact URL"
+          echo "JSON content:"
+          cat build_view.json || echo "No JSON file"
+          echo "Text content:"
+          cat build_view_text.txt || echo "No text file"
           exit 1
         fi
         
