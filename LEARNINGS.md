@@ -305,3 +305,207 @@ React.useEffect(() => {
 import { Camera } from "expo-camera";
 // Ensure expo-camera is in package.json dependencies
 ```
+
+## 2025-01-XX – GitHub Workflow EAS Build Download Failure: Mixed JSON/Text Output Parsing
+
+**Problem**: GitHub workflow for Android APK builds was failing during the "📱 Download APK" step with exit code 5. The build itself completed successfully, but artifact download failed.
+
+**Root Cause**: The `eas build:view --json` command outputs mixed content - both progress messages and JSON data - causing JSON parsing failures:
+
+```bash
+# ACTUAL OUTPUT FROM eas build:view --json
+- Fetching the build…
+✔ Found a matching build for the project @ayushbharti/Open-WebUI-Client
+{
+  "id": "f392db17-9277-4f46-93de-5f84c54319cd",
+  "status": "FINISHED",
+  "artifacts": {
+    "buildUrl": "https://expo.dev/artifacts/eas/w5uKN6vroA2yGCNT6JsFda.apk"
+  }
+  // ... rest of JSON
+}
+```
+
+**Why This Failed**:
+- Script expected pure JSON but got progress messages mixed with JSON
+- `jq` parsing failed on the mixed content
+- No fallback handling for malformed JSON
+- Poor error reporting made debugging difficult
+
+**Solution Pattern - Robust JSON Extraction with Fallbacks**:
+
+1. **Extract JSON from Mixed Output**:
+```bash
+# Save raw output first
+eas build:view "$ID" --json > build_view_raw.json 2>&1
+
+# Extract only JSON part (from first { to last })
+sed -n '/{/,/}/p' build_view_raw.json > build_view.json
+
+# Validate extracted JSON
+if jq empty build_view.json 2>/dev/null; then
+  echo "Valid JSON extracted"
+else
+  echo "Invalid JSON, trying text parsing fallback..."
+fi
+```
+
+2. **Multiple Fallback Strategies**:
+```bash
+# Primary: JSON extraction
+# Secondary: Text parsing for artifact URLs
+# Tertiary: Direct API call
+if eas build:view "$ID" --json > build_view_raw.json 2>&1; then
+  # Extract and validate JSON
+elif eas build:view "$ID" > build_view_text.txt 2>&1; then
+  # Parse artifact URL from text output
+  ARTIFACT_LINE=$(grep "^Artifact" build_view_text.txt || echo "")
+  URL=$(echo "$ARTIFACT_LINE" | awk '{print $2}')
+else
+  # Direct API fallback
+  curl -H "Authorization: Bearer $EXPO_TOKEN" \
+       "https://api.expo.dev/v2/builds/$ID" > build_view.json
+fi
+```
+
+3. **Enhanced Error Handling and Debugging**:
+```bash
+# Add debugging throughout the process
+echo "Attempting to extract artifact URL from JSON..."
+URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // empty' build_view.json 2>/dev/null)
+echo "Extracted URL: '$URL'"
+
+# Explicit curl error checking
+if curl -L "$URL" -o "$FILENAME"; then
+  echo "curl command completed successfully"
+else
+  echo "curl command failed with exit code $?"
+  exit 1
+fi
+
+# Detailed file verification
+echo "Checking if file exists: $FILENAME"
+if [ -f "$FILENAME" ]; then
+  FILE_SIZE=$(du -h "$FILENAME" | cut -f1)
+  echo "Download successful. File size: $FILE_SIZE"
+else
+  echo "Download failed - file not found"
+  ls -la . || true
+  exit 1
+fi
+```
+
+**Key Learnings**:
+- **EAS CLI outputs are not always pure JSON** - even with `--json` flag, expect mixed content
+- **Always validate JSON before parsing** - use `jq empty` to verify structure
+- **Implement multiple fallback strategies** - JSON extraction → text parsing → API calls
+- **Add comprehensive debugging** - log each step to identify failure points quickly
+- **Handle curl failures explicitly** - check exit codes and provide meaningful errors
+- **Test with actual EAS output** - don't assume CLI tools behave as documented
+
+**Prevention Checklist**:
+- [ ] Always save raw CLI output before processing
+- [ ] Extract and validate JSON separately from mixed output
+- [ ] Implement multiple parsing fallback strategies
+- [ ] Add detailed logging at each step
+- [ ] Test with real EAS CLI output, not mock data
+- [ ] Handle network/download failures explicitly
+- [ ] Verify file existence and size after downloads
+
+**GitHub Workflow Pattern**:
+```yaml
+- name: 📱 Download APK
+  run: |
+    # Get build ID
+    ID=$(jq -r '.[0].id // .id // empty' build.json)
+    
+    # Robust build info fetching with fallbacks
+    for i in {1..3}; do
+      if eas build:view "$ID" --json > build_view_raw.json 2>&1; then
+        # Extract only JSON part
+        sed -n '/{/,/}/p' build_view_raw.json > build_view.json
+        if jq empty build_view.json 2>/dev/null; then
+          break
+        fi
+      fi
+      # Additional fallback strategies...
+    done
+    
+    # Extract URL with multiple JSON path attempts
+    URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // empty' build_view.json)
+    
+    # Download with explicit error handling
+    if curl -L "$URL" -o "$FILENAME"; then
+      echo "Download successful"
+    else
+      exit 1
+    fi
+```
+
+**Tools Used**:
+- `sed -n '/{/,/}/p'` - Extract JSON from mixed output
+- `jq empty` - Validate JSON structure
+- `curl -L` - Follow redirects for artifact downloads
+- Multiple JSON path attempts with `//` operator
+
+### Update – 2025-09-09: Final stable pattern adopted
+
+- __Symptom (follow-up)__:
+  - In some GitHub runners, `eas build:download` flags and `eas build:view --json` behavior differed between CLI versions, producing errors like “Unexpected arguments” or mixed JSON/text that broke `jq`.
+
+- __Final Fix__:
+  - Avoid `build:download` and `build:view` entirely in CI. Instead:
+    1) Run the build with `--wait --json` to produce `build.json`.
+    2) Parse the artifact URL directly from `build.json`.
+    3) Download with `curl -L`.
+
+- __Files Updated__:
+  - `.github/workflows/build-android.yml`
+  - `.github/workflows/release.yml`
+
+- __Snippet (Android APK)__:
+  ```yaml
+  - name: 🏗️ Build Android
+    run: |
+      eas build --non-interactive --platform android --profile production-apk --wait --json > android_build.json
+
+  - name: 📥 Download Android APK
+    run: |
+      FNAME="Open-WebUI-Client-${VERSION}-android.apk"
+      URL=$(jq -r '.[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl // .artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' android_build.json)
+      if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+        echo "Could not resolve Android artifact URL" && head -c 2000 android_build.json && exit 1
+      fi
+      curl -L "$URL" -o "$FNAME"
+  ```
+
+- __Snippet (iOS IPA)__:
+  ```yaml
+  - name: 🏗️ Build iOS
+    run: |
+      eas build --non-interactive --platform ios --profile ios-internal --wait --json > ios_build.json
+
+  - name: 📥 Download iOS IPA
+    run: |
+      FNAME="Open-WebUI-Client-${VERSION}-ios.ipa"
+      URL=$(jq -r '.[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl // .artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' ios_build.json)
+      if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+        echo "Could not resolve iOS artifact URL" && head -c 2000 ios_build.json && exit 1
+      fi
+      curl -L "$URL" -o "$FNAME"
+  ```
+
+- __YAML Safety Fixes__:
+  - Do not embed GitHub expressions inside JavaScript template strings (e.g., within `actions/github-script`). Pass values via `env:` and reference `process.env.VAR` in the script.
+  - Build multi-line comment bodies via an array and `join('\n')` to avoid YAML implicit key parsing errors.
+
+- __Utilities__:
+  - Install `jq` before parsing JSON in runners: `sudo apt-get update && sudo apt-get install -y jq`.
+  - Persist dynamic values (e.g., `PROFILE`, `BUILD_ID`) via `$GITHUB_ENV` and step outputs.
+
+- __Prevention Checklist (updated)__:
+  - [ ] Prefer `eas build --wait --json` and parse from the resulting JSON; avoid `build:view`/`build:download` in CI.
+  - [ ] Always `apt-get install jq` before parsing.
+  - [ ] Avoid `${{ ... }}` inside JS template strings; use step `env` instead.
+  - [ ] When posting PR comments, construct strings with `['line1','line2'].join('\n')`.
+  - [ ] Keep artifact URL extraction tolerant to multiple JSON shapes using `//` fallback paths.

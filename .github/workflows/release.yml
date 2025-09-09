@@ -89,14 +89,38 @@ jobs:
         run: |
           FNAME="Open-WebUI-Client-${VERSION}-android.apk"
           echo "Resolving Android artifact URL for $ANDROID_BUILD_ID"
-          eas build:view --non-interactive --json --id "$ANDROID_BUILD_ID" > android_view.json
+          
+          # Robust build info fetching with JSON extraction
+          eas build:view --non-interactive --json --id "$ANDROID_BUILD_ID" > android_view_raw.json 2>&1
+          
+          # Extract only JSON part (from first { to last })
+          sed -n '/{/,/}/p' android_view_raw.json > android_view.json
+          
+          # Validate extracted JSON
+          if ! jq empty android_view.json 2>/dev/null; then
+            echo "Invalid JSON extracted, showing raw output:"
+            cat android_view_raw.json
+            exit 1
+          fi
+          
+          echo "Build view content:"
+          cat android_view.json
+          
           URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' android_view.json)
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "Could not resolve Android artifact URL from android_view.json" && cat android_view.json && exit 1
+            echo "Could not resolve Android artifact URL from android_view.json"
+            cat android_view.json
+            exit 1
           fi
+          
           echo "Downloading $URL -> $FNAME"
-          curl -L "$URL" -o "$FNAME"
-          echo "ANDROID_APK=$FNAME" >> $GITHUB_ENV
+          if curl -L "$URL" -o "$FNAME"; then
+            echo "Download successful. File size: $(du -h "$FNAME" | cut -f1)"
+            echo "ANDROID_APK=$FNAME" >> $GITHUB_ENV
+          else
+            echo "Download failed"
+            exit 1
+          fi
 
       - name: 🏗️ Build iOS (ios-internal)
         id: build_ios
@@ -110,14 +134,38 @@ jobs:
         run: |
           FNAME="Open-WebUI-Client-${VERSION}-ios.ipa"
           echo "Resolving iOS artifact URL for $IOS_BUILD_ID"
-          eas build:view --non-interactive --json --id "$IOS_BUILD_ID" > ios_view.json
+          
+          # Robust build info fetching with JSON extraction
+          eas build:view --non-interactive --json --id "$IOS_BUILD_ID" > ios_view_raw.json 2>&1
+          
+          # Extract only JSON part (from first { to last })
+          sed -n '/{/,/}/p' ios_view_raw.json > ios_view.json
+          
+          # Validate extracted JSON
+          if ! jq empty ios_view.json 2>/dev/null; then
+            echo "Invalid JSON extracted, showing raw output:"
+            cat ios_view_raw.json
+            exit 1
+          fi
+          
+          echo "Build view content:"
+          cat ios_view.json
+          
           URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' ios_view.json)
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "Could not resolve iOS artifact URL from ios_view.json" && cat ios_view.json && exit 1
+            echo "Could not resolve iOS artifact URL from ios_view.json"
+            cat ios_view.json
+            exit 1
           fi
+          
           echo "Downloading $URL -> $FNAME"
-          curl -L "$URL" -o "$FNAME"
-          echo "IOS_IPA=$FNAME" >> $GITHUB_ENV
+          if curl -L "$URL" -o "$FNAME"; then
+            echo "Download successful. File size: $(du -h "$FNAME" | cut -f1)"
+            echo "IOS_IPA=$FNAME" >> $GITHUB_ENV
+          else
+            echo "Download failed"
+            exit 1
+          fi
 
       - name: 🚀 Submit iOS to TestFlight (optional)
         if: ${{ env.IOS_BUILD_ID != '' }}
