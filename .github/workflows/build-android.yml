@@ -53,7 +53,7 @@ jobs:
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           PROFILE="${{ github.event.inputs.profile }}"
         elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
-          PROFILE="production"
+          PROFILE="production-apk"
         else
           PROFILE="preview"
         fi
@@ -81,16 +81,62 @@ jobs:
           echo "No build ID found in build.json; cannot download."
           exit 1
         fi
+        
         echo "Fetching build details for $ID"
-        eas build:view --non-interactive --json --id "$ID" > build_view.json
+        # Add retry logic for build:view command
+        for i in {1..3}; do
+          echo "Attempt $i to fetch build details..."
+          if eas build:view --non-interactive --json --id "$ID" > build_view.json 2>&1; then
+            echo "Successfully fetched build details"
+            break
+          else
+            echo "Failed to fetch build details (attempt $i)"
+            if [ $i -eq 3 ]; then
+              echo "All attempts failed. Build view output:"
+              cat build_view.json || echo "No build_view.json file created"
+              exit 1
+            fi
+            sleep 10
+          fi
+        done
+        
+        # Check if build_view.json has valid content
+        if [ ! -s build_view.json ]; then
+          echo "build_view.json is empty or doesn't exist"
+          exit 1
+        fi
+        
+        echo "Build view content:"
+        cat build_view.json
+        
         URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' build_view.json)
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
           echo "Could not resolve artifact URL from build_view.json"
-          cat build_view.json
+          echo "Available fields in artifacts:"
+          jq -r '.artifacts // empty' build_view.json
           exit 1
         fi
+        
         echo "Resolved artifact URL: $URL"
-        curl -L "$URL" -o ./app-build.apk
+        
+        # Determine file extension based on build type
+        if [[ "$URL" == *".aab"* ]] || [[ "${{ env.PROFILE }}" == "production" ]]; then
+          FILENAME="./app-build.aab"
+        else
+          FILENAME="./app-build.apk"
+        fi
+        
+        echo "Downloading to: $FILENAME"
+        curl -L "$URL" -o "$FILENAME"
+        
+        # Verify download
+        if [ -f "$FILENAME" ]; then
+          echo "Download successful. File size: $(du -h "$FILENAME" | cut -f1)"
+          echo "ARTIFACT_FILE=$FILENAME" >> $GITHUB_ENV
+        else
+          echo "Download failed - file not found"
+          exit 1
+        fi
 
     - name: 📊 Build Summary
       if: success()
@@ -103,18 +149,19 @@ jobs:
         echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # Get APK size
-        if [ -f "./app-build.apk" ]; then
-          APK_SIZE=$(du -h ./app-build.apk | cut -f1)
-          echo "**APK Size:** $APK_SIZE" >> $GITHUB_STEP_SUMMARY
+        # Get artifact size
+        if [ -f "$ARTIFACT_FILE" ]; then
+          ARTIFACT_SIZE=$(du -h "$ARTIFACT_FILE" | cut -f1)
+          ARTIFACT_TYPE=$(basename "$ARTIFACT_FILE" | cut -d'.' -f2 | tr '[:lower:]' '[:upper:]')
+          echo "**${ARTIFACT_TYPE} Size:** $ARTIFACT_SIZE" >> $GITHUB_STEP_SUMMARY
         fi
 
-    - name: 📦 Upload APK Artifact
+    - name: 📦 Upload Android Artifact
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: android-apk-${{ github.run_number }}
-        path: ./app-build.apk
+        name: android-${{ env.PROFILE }}-${{ github.run_number }}
+        path: ${{ env.ARTIFACT_FILE }}
         retention-days: 30
 
     - name: 💬 Comment PR
@@ -126,19 +173,22 @@ jobs:
       with:
         script: |
           const fs = require('fs');
-          const apkSize = fs.existsSync('./app-build.apk') 
-            ? require('child_process').execSync('du -h ./app-build.apk').toString().split('\t')[0]
+          const artifactFile = process.env.ARTIFACT_FILE || './app-build.apk';
+          const artifactExists = fs.existsSync(artifactFile);
+          const artifactSize = artifactExists 
+            ? require('child_process').execSync(`du -h "${artifactFile}"`).toString().split('\t')[0]
             : 'Unknown';
+          const artifactType = artifactFile.includes('.aab') ? 'AAB' : 'APK';
           const lines = [
             '## 📱 Android Build Ready',
             '',
             '**Build completed successfully!**',
             `- **Profile:** ${process.env.PROFILE || 'auto-detected'}`,
-            `- **APK Size:** ${apkSize}`,
+            `- **${artifactType} Size:** ${artifactSize}`,
             '- **Download:** Check the "Artifacts" section in this workflow run',
             `- **Build ID:** ${process.env.BUILD_ID}`,
             '',
-            'You can download and test the APK from the workflow artifacts.'
+            `You can download and test the ${artifactType} from the workflow artifacts.`
           ];
           const bodyText = lines.join('\n');
 
