@@ -12,7 +12,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.aevumis.openwebuiclient",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Allow Open WebUI Client to access your location for features provided by the web app."
+        "NSLocationWhenInUseUsageDescription": "Allow Open WebUI Client to access your location for features provided by the web app.",
+        "NSMicrophoneUsageDescription": "Allow Open WebUI Client to access your microphone for voice input features in the web app.",
+        "NSCameraUsageDescription": "Allow Open WebUI Client to access your camera for video features in the web app."
       }
     },
     "android": {
@@ -24,7 +26,10 @@
       "package": "com.aevumis.openwebuiclient",
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.CAMERA"
       ]
     },
     "web": {
@@ -46,6 +51,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "cfd1a41d-74ea-4939-95ba-9e22dd7acbbb"
+      }
     }
   }
 }

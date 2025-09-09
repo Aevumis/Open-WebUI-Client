@@ -1,5 +1,6 @@
 import { Stack } from "expo-router";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import Toast from "react-native-toast-message";
 import { setLogConfig } from "../lib/log";
 
 export default function RootLayout() {
@@ -7,12 +8,14 @@ export default function RootLayout() {
   setLogConfig({
     level: typeof __DEV__ !== 'undefined' && __DEV__ ? 'debug' : 'info',
     scopes: (typeof __DEV__ !== 'undefined' && __DEV__)
-      ? ['sync', 'outbox', 'cache', 'net', 'webviewDrain', 'webview']
-      : ['sync', 'outbox', 'cache', 'net'],
+      ? ['webview', 'injection', 'sync', 'outbox', 'permissions']
+      : ['webview', 'injection', 'permissions'],
   });
   return (
     <SafeAreaProvider>
       <Stack screenOptions={{ headerShown: false }} />
+      {/* Global toast host (library) */}
+      <Toast />
     </SafeAreaProvider>
   );
 }

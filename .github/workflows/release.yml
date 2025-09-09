@@ -1,0 +1,235 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Build and Publish Release
+    runs-on: ubuntu-latest
+    env:
+      EAS_NO_VCS: 1
+    steps:
+      - name: 🏗️ Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🧰 Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🧪 Print tag and derive version
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: 🧰 Setup Expo/EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: 🔧 Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: 🔢 Sync app.json and package.json version to tag
+        run: |
+          node -e '
+          const fs = require("fs");
+          const version = process.env.VERSION;
+          // derive numeric code from semver: major*10000 + minor*100 + patch
+          const m = version.match(/^(\d+)\.(\d+)\.(\d+)/);
+          if (!m) { throw new Error(`Invalid semver: ${version}`); }
+          const [_, maj, min, pat] = m;
+          const code = (+maj)*10000 + (+min)*100 + (+pat);
+          const updateJSON = (file, path, setFn) => {
+            const json = JSON.parse(fs.readFileSync(file, "utf8"));
+            setFn(json);
+            fs.writeFileSync(file, JSON.stringify(json, null, 2) + "\n");
+            console.log(`Updated ${file}`);
+          };
+          updateJSON("package.json", [], (j) => { j.version = version; });
+          updateJSON("app.json", ["expo","version"], (j) => {
+            if(!j.expo) j.expo = {};
+            j.expo.version = version;
+            j.expo.ios = j.expo.ios || {};
+            j.expo.ios.buildNumber = String(code);
+            j.expo.android = j.expo.android || {};
+            j.expo.android.versionCode = code;
+          });
+          '
+          cat package.json | head -n 20
+          cat app.json | head -n 40
+
+      - name: 🏗️ Build Android (production-apk)
+        id: build_android
+        run: |
+          eas build --non-interactive --platform android --profile production-apk --wait --json > android_build.json
+          cat android_build.json
+          ANDROID_BUILD_ID=$(cat android_build.json | jq -r '.[0].id // .id')
+          echo "ANDROID_BUILD_ID=$ANDROID_BUILD_ID" >> $GITHUB_ENV
+
+      - name: 📥 Download Android APK
+        run: |
+          FNAME="Open-WebUI-Client-${VERSION}-android.apk"
+          eas build:download --platform android --id "$ANDROID_BUILD_ID" --output "$FNAME"
+          echo "ANDROID_APK=$FNAME" >> $GITHUB_ENV
+
+      - name: 🏗️ Build iOS (ios-internal)
+        id: build_ios
+        run: |
+          eas build --non-interactive --platform ios --profile ios-internal --wait --json > ios_build.json
+          cat ios_build.json
+          IOS_BUILD_ID=$(cat ios_build.json | jq -r '.[0].id // .id')
+          echo "IOS_BUILD_ID=$IOS_BUILD_ID" >> $GITHUB_ENV
+
+      - name: 📥 Download iOS IPA
+        run: |
+          FNAME="Open-WebUI-Client-${VERSION}-ios.ipa"
+          eas build:download --platform ios --id "$IOS_BUILD_ID" --output "$FNAME"
+          echo "IOS_IPA=$FNAME" >> $GITHUB_ENV
+
+      - name: 🚀 Submit iOS to TestFlight (optional)
+        if: ${{ env.IOS_BUILD_ID != '' }}
+        run: |
+          # Requires App Store Connect credentials configured in EAS or via secrets
+          # If configured, this will submit the latest build for TestFlight
+          eas submit --platform ios --latest --non-interactive || echo "TestFlight submit failed or not configured; continuing"
+
+      - name: 🔐 Checksums
+        run: |
+          echo "Generating SHA256 checksums"
+          shasum -a 256 "$ANDROID_APK" > SHA256SUMS.txt
+          shasum -a 256 "$IOS_IPA" >> SHA256SUMS.txt
+
+      - name: 📝 Generate Release Notes
+        id: notes
+        run: |
+          VERSION=${VERSION}
+          TAG=${GITHUB_REF_NAME}
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' ${TAG}^ 2>/dev/null || echo '')
+          echo "Previous tag: $PREV_TAG"
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="$PREV_TAG..$TAG"
+          else
+            RANGE="$TAG"
+          fi
+          echo "Range: $RANGE"
+
+          echo "# Open-WebUI-Client ${VERSION}" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "## Downloads" >> RELEASE_NOTES.md
+          echo "- Android APK: ${ANDROID_APK}" >> RELEASE_NOTES.md
+          echo "- iOS IPA (for internal/sideload testing): ${IOS_IPA}" >> RELEASE_NOTES.md
+          if [ -n "${{ secrets.TESTFLIGHT_PUBLIC_LINK }}" ]; then
+            echo "- TestFlight: ${{ secrets.TESTFLIGHT_PUBLIC_LINK }}" >> RELEASE_NOTES.md
+          else
+            echo "- TestFlight: Will appear once public link is available (configure TESTFLIGHT_PUBLIC_LINK secret to include automatically)." >> RELEASE_NOTES.md
+          fi
+          echo "" >> RELEASE_NOTES.md
+          echo "## Checksums" >> RELEASE_NOTES.md
+          cat SHA256SUMS.txt >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "## Changes" >> RELEASE_NOTES.md
+          if [ -n "$PREV_TAG" ]; then
+            git log --pretty=format:'- %s (%h)' $RANGE >> RELEASE_NOTES.md
+          else
+            git log --pretty=format:'- %s (%h)' $TAG >> RELEASE_NOTES.md
+          fi
+          echo "" >> RELEASE_NOTES.md
+
+      - name: 📦 Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Open-WebUI-Client ${{ env.VERSION }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+
+      - name: 🔼 Upload Android APK Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.ANDROID_APK }}
+          asset_name: ${{ env.ANDROID_APK }}
+          asset_content_type: application/vnd.android.package-archive
+
+      - name: 🔼 Upload iOS IPA Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.IOS_IPA }}
+          asset_name: ${{ env.IOS_IPA }}
+          asset_content_type: application/octet-stream
+
+      - name: 🔼 Upload Checksums
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: SHA256SUMS.txt
+          asset_name: SHA256SUMS.txt
+          asset_content_type: text/plain
+
+      - name: 🧾 Ensure and update CHANGELOG.md
+        run: |
+          VERSION=${VERSION}
+          DATE=$(date +%Y-%m-%d)
+          if [ ! -f CHANGELOG.md ]; then
+            echo "# Changelog" > CHANGELOG.md
+            echo "All notable changes to this project will be documented in this file." >> CHANGELOG.md
+            echo "" >> CHANGELOG.md
+          fi
+          echo "" >> CHANGELOG.md
+          echo "## [${VERSION}] - ${DATE}" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "### Added/Changed" >> CHANGELOG.md
+          if git rev-parse -q --verify refs/tags/${GITHUB_REF_NAME}^ >/dev/null; then
+            PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' ${GITHUB_REF_NAME}^ 2>/dev/null || echo '')
+          else
+            PREV_TAG=""
+          fi
+          if [ -n "$PREV_TAG" ]; then
+            git log --pretty=format:'- %s (%h)' $PREV_TAG..$GITHUB_REF_NAME >> CHANGELOG.md
+          else
+            git log --pretty=format:'- %s (%h)' $GITHUB_REF_NAME >> CHANGELOG.md
+          fi
+
+      - name: 🧾 Open PR to update CHANGELOG.md and versions
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(release): ${{ env.VERSION }} version + changelog"
+          title: "chore(release): ${{ env.VERSION }} version + changelog"
+          body: "Automated version bump in app.json/package.json and CHANGELOG.md for ${{ env.VERSION }}"
+          branch: chore/release-${{ env.VERSION }}
+          add-paths: |
+            CHANGELOG.md
+            app.json
+            package.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

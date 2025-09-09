@@ -4,6 +4,42 @@ This document tracks issues encountered and how they were fixed, to avoid regres
 
 ---
 
+## 2025-09-04 – Stable dark mode via document-start theme bootstrap
+
+- Symptom:
+  - Dark mode flickered or applied late in the WebView, especially around initial load and navigations.
+  - Some pages started in light mode, then flipped to dark after the app finished mounting, causing a flash.
+  - `matchMedia('(prefers-color-scheme: dark)')` inside the WebView didn’t reliably reflect the React Native device scheme.
+- Root Cause:
+  - Theme setup occurred too late (post-load). Framework hydration and site theme persistence were racing the app’s theme.
+  - The site persisted `theme` in `localStorage`, which could override system preference depending on stored values (`'dark'|'light'|'system'|'auto'|null`).
+  - RN WebView environment didn’t always propagate OS scheme to `matchMedia` at page start.
+- Fix:
+  - Inject a document-start theme bootstrap inside the WebView (`buildThemeBootstrap()` in `components/OpenWebUIView.tsx`). It:
+    - Shims `window.matchMedia('(prefers-color-scheme: dark)')` to mirror RN’s `useColorScheme()`.
+    - Applies `class="dark"`, `data-theme`, and `style.colorScheme` on `<html>` immediately.
+    - Adds a `<meta name="color-scheme" content="dark light">` tag to hint UA rendering (form controls, etc.).
+    - Respects explicit user choice saved in `localStorage` (only overrides when stored theme is `null/system/auto`).
+    - Exposes `window.__owui_notifyThemeChange(isDark)` to re-assert theme on navigation or device changes.
+    - Posts a debug message `{ scope:'injection', event:'themeBootstrap' }` for verification.
+  - On RN side, re-applies theme on `useColorScheme()` changes and on navigation events via `__owui_notifyThemeChange` if present.
+  - Native screens now adopt system dark/light using `useColorScheme()` and theme-aware palettes:
+    - `app/servers.tsx` (server picker/settings)
+    - `app/offline.tsx` (offline list)
+    - `app/offline/view.tsx` (offline conversation view)
+- Changes:
+  - `components/OpenWebUIView.tsx`: Added `buildThemeBootstrap()` and included it in `injectedJavaScriptBeforeContentLoaded`; added theme probe and re-assert logic on load/nav changes.
+  - `app/_layout.tsx`: Expanded centralized logging scopes in dev to `['webview','probe','webviewDrain','outbox','sync','theme']` and prod to `['sync','outbox']`.
+  - `app/servers.tsx`, `app/offline.tsx`, `app/offline/view.tsx`: Implemented system theme palette via `useColorScheme()` and applied to backgrounds, text, borders, inputs, and pills.
+- Validation:
+  - WebView debug log shows `{ type:'debug', scope:'injection', event:'themeBootstrap' }` at document-start.
+  - `themeProbe` logs report `hasDarkClass=true`, `dataTheme='dark'`, `mqlDark=true` when device is in dark mode.
+  - No visible flash of incorrect theme during initial load or navigation.
+  - Native screens switch cleanly with OS theme.
+- Notes:
+  - If mismatches reappear, consider gating theme override strictly to `localStorage` values and re-checking any site-level CSS that toggles post-hydration.
+  - Keep logging scope `'theme'` enabled in dev to quickly verify theme state via probes.
+
 ## 2025-09-02 – Safe area overlap (status bar and home indicator)
 
 - Symptom:
@@ -187,3 +223,85 @@ This document tracks issues encountered and how they were fixed, to avoid regres
 - Notes:
   - Duplicate `syncStart`/`done` can occur if the WebView re-injects around navigations; current behavior is benign. We can further gate with a page-level flag (e.g., `window.__owui_syncing`) if needed to eliminate duplicates.
   - If a non-httpOnly token becomes available in the future, native-token-based full sync will take over automatically.
+
+## 2025-01-XX – WebView Camera Permission Bug: Automatic Grant Without Native Permission Check
+
+**Problem**: Camera capture button in the web app didn't work on fresh installs or when device permission was set to "Ask every time", but worked after manually granting "Allow only while using app" in device settings.
+
+**Root Cause**: The WebView `onPermissionRequest` handler was automatically granting camera/microphone permissions without first verifying that the native app had the required permissions:
+
+```tsx
+// PROBLEMATIC CODE - DO NOT USE
+onPermissionRequest={(request) => {
+  if (request.nativeEvent.resources.includes('camera')) {
+    request.nativeEvent.grant(); // ❌ Grants without checking native permissions
+  }
+}}
+```
+
+**Why This Failed**:
+- Fresh install: WebView grants permission but app lacks native camera permission → silent failure
+- "Ask every time": Same issue - WebView grants but native permission not established
+- "Allow while using": Works because native permission already granted manually
+
+**Solution Pattern - Two-Pronged Approach**:
+
+1. **Proactive Permission Requests on Mount**:
+```tsx
+React.useEffect(() => {
+  (async () => {
+    const cameraPermission = await Camera.requestCameraPermissionsAsync();
+    const microphonePermission = await Camera.requestMicrophonePermissionsAsync();
+    
+    logInfo('permissions', 'proactive request', {
+      camera: cameraPermission.status,
+      microphone: microphonePermission.status
+    });
+  })();
+}, []);
+```
+
+2. **Proper Permission Handler with Native Check**:
+```tsx
+{...(Platform.OS === 'android' && {
+  onPermissionRequest: async (request: any) => {
+    const resources = request.nativeEvent.resources;
+    
+    if (resources.includes('camera')) {
+      const { status } = await Camera.requestCameraPermissionsAsync();
+      if (status === 'granted') {
+        request.nativeEvent.grant();
+      } else {
+        request.nativeEvent.deny();
+        Toast.show({
+          type: 'error',
+          text1: 'Camera Permission Required',
+          text2: 'Please enable camera access in Settings to use this feature.',
+        });
+      }
+    }
+  }
+})}
+```
+
+**Key Learnings**:
+- **Never auto-grant WebView permissions without checking native permissions first**
+- **Proactive permission requests prevent silent failures** - request permissions early when the component mounts
+- **Platform-specific handling** - `onPermissionRequest` is Android-specific, use conditional props
+- **User feedback is crucial** - show clear error messages when permissions are denied
+- **Test all permission states** - "Ask every time", "Allow", "Don't allow", and fresh installs
+- **Log permission flows** - essential for debugging permission-related issues
+
+**Prevention Checklist**:
+- [ ] Always check native permissions before granting WebView permissions
+- [ ] Request permissions proactively when possible
+- [ ] Provide clear user feedback for permission denials
+- [ ] Test on fresh installs and all permission states
+- [ ] Add comprehensive logging for permission flows
+- [ ] Consider platform differences in permission handling
+
+**Dependencies Required**:
+```tsx
+import { Camera } from "expo-camera";
+// Ensure expo-camera is in package.json dependencies
+```

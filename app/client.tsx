@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Platform, Text, TouchableOpacity, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { ActivityIndicator, Alert, Text, TouchableOpacity, View, useColorScheme } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -7,8 +7,10 @@ import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
 import { maybeFullSync, isFullSyncDone } from "../lib/sync";
 import { getCacheIndex } from "../lib/cache";
-import { drain } from "../lib/outbox";
+import { drain, getSettings, count } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
+import Toast from "react-native-toast-message";
+import * as Haptics from "expo-haptics";
 
 const STORAGE_KEY = "servers:list";
 
@@ -17,6 +19,28 @@ export default function ClientScreen() {
   const [url, setUrl] = useState<string | null>(null);
   const [label, setLabel] = useState<string | undefined>(undefined);
   const [isOnline, setIsOnline] = useState(true);
+  const [queuedCount, setQueuedCount] = useState(0);
+  const [syncStatus, setSyncStatus] = useState<'checking' | 'syncing' | 'done' | 'disabled'>('checking');
+  const scheme = useColorScheme();
+  const C = scheme === 'dark'
+    ? {
+        bg: '#0b0b0b',
+        cardBg: '#111111',
+        text: '#e5e7eb',
+        textStrong: '#ffffff',
+        separator: '#27272a',
+        primary: '#4fb3d9',
+        textOnPrimary: '#ffffff',
+      }
+    : {
+        bg: '#ffffff',
+        cardBg: '#ffffff',
+        text: '#111827',
+        textStrong: '#000000',
+        separator: '#eeeeee',
+        primary: '#0a7ea4',
+        textOnPrimary: '#ffffff',
+      };
 
   useEffect(() => {
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
@@ -42,6 +66,17 @@ export default function ClientScreen() {
     })();
   }, [params.id]);
 
+  // Initialize queued count when URL changes
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!url) return;
+        const c = await count(new URL(url).host);
+        setQueuedCount(c);
+      } catch {}
+    })();
+  }, [url]);
+
   // Kick off sync and keep retrying periodically until done; also drain outbox each attempt
   useEffect(() => {
     if (!url || !isOnline) return;
@@ -52,23 +87,43 @@ export default function ClientScreen() {
       if (running) return;
       running = true;
       try {
-        logInfo('sync', 'maybeFullSync start');
-        const res = await maybeFullSync(url);
-        if (res) {
-          logInfo('sync', 'fullSync result', res);
-          try {
-            const idx = await getCacheIndex();
-            const host = new URL(url).host;
-            const count = idx.filter(it => it.host === host).length;
-            logInfo('cache', 'index count for host', { host, count });
-          } catch {}
+        const host = new URL(url).host;
+        const settings = await getSettings(host);
+        if (settings.fullSyncOnLoad) {
+          const done = await isFullSyncDone(url);
+          if (done) {
+            setSyncStatus('done');
+          } else {
+            setSyncStatus('syncing');
+            logInfo('sync', 'maybeFullSync start');
+            const res = await maybeFullSync(url);
+            if (res) {
+              logInfo('sync', 'fullSync result', res);
+              setSyncStatus('done');
+              try {
+                const idx = await getCacheIndex();
+                const count = idx.filter(it => it.host === host).length;
+                logInfo('cache', 'index count for host', { host, count });
+              } catch {}
+            }
+            logInfo('sync', 'maybeFullSync done');
+          }
+        } else {
+          setSyncStatus('disabled');
+          logInfo('sync', 'fullSyncOnLoad disabled, skip maybeFullSync');
         }
-        logInfo('sync', 'maybeFullSync done');
       } catch {}
       try {
         logInfo('outbox', 'drain start');
         const dres = await drain(url);
         logInfo('outbox', 'drain result', dres);
+        try { setQueuedCount(dres.remaining); } catch {}
+        try {
+          if (dres.sent > 0) {
+            try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); } catch {}
+            Toast.show({ type: 'success', text1: `Sent ${dres.sent} queued` });
+          }
+        } catch {}
       } catch {}
       running = false;
     };
@@ -79,8 +134,16 @@ export default function ClientScreen() {
     const timer = setInterval(async () => {
       if (cancelled) return;
       try {
+        const host = new URL(url).host;
+        const settings = await getSettings(host);
+        if (!settings.fullSyncOnLoad) {
+          logInfo('sync', 'fullSyncOnLoad disabled, stop retries');
+          clearInterval(timer);
+          return;
+        }
         const done = await isFullSyncDone(url);
         if (done) {
+          setSyncStatus('done');
           logInfo('sync', 'fullSync already done, stopping retries');
           clearInterval(timer);
           return;
@@ -94,25 +157,38 @@ export default function ClientScreen() {
 
   if (!url) {
     return (
-      <SafeAreaView style={{ flex: 1, alignItems: "center", justifyContent: "center" }} edges={["top", "bottom"]}>
-        <ActivityIndicator />
-        <Text style={{ marginTop: 8 }}>Loading…</Text>
+      <SafeAreaView style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: C.bg }} edges={["top", "bottom"]}>
+        <ActivityIndicator color={C.primary} />
+        <Text style={{ marginTop: 8, color: C.text }}>Loading…</Text>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top", "bottom"]}>
-      <View style={{ height: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }} edges={["top", "bottom"]}>
+      <View style={{ height: 48, backgroundColor: C.cardBg, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: C.separator }}>
         <TouchableOpacity onPress={() => router.replace("/servers")}>
-          <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Servers</Text>
+          <Text style={{ color: C.primary, fontWeight: "700" }}>Servers</Text>
         </TouchableOpacity>
-        <Text style={{ fontWeight: "700" }}>{label || url}</Text>
-        <TouchableOpacity onPress={() => router.push("/offline")}>
-          <Text style={{ color: "#0a7ea4", fontWeight: "700" }}>Offline</Text>
-        </TouchableOpacity>
+        <Text style={{ color: C.textStrong, fontWeight: "700" }}>{label || url}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {syncStatus === 'syncing' && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: 10 }}>
+              <ActivityIndicator size="small" color={C.primary} style={{ marginRight: 4 }} />
+              <Text style={{ color: C.primary, fontWeight: '600', fontSize: 12 }}>Syncing...</Text>
+            </View>
+          )}
+          {queuedCount > 0 && (
+            <View style={{ backgroundColor: C.primary, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, marginRight: 10 }}>
+              <Text style={{ color: C.textOnPrimary, fontWeight: '700', fontSize: 12 }}>Queued: {queuedCount}</Text>
+            </View>
+          )}
+          <TouchableOpacity onPress={() => router.push("/offline")}>
+            <Text style={{ color: C.primary, fontWeight: "700" }}>Offline</Text>
+          </TouchableOpacity>
+        </View>
       </View>
-      <OpenWebUIView baseUrl={url} online={isOnline} />
+      <OpenWebUIView baseUrl={url} online={isOnline} onQueueCountChange={setQueuedCount} />
     </SafeAreaView>
   );
 }
