@@ -39,6 +39,11 @@ jobs:
         eas-version: latest
         token: ${{ secrets.EXPO_TOKEN }}
 
+    - name: 🔧 Install jq
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+
     - name: 📦 Install dependencies
       run: npm ci
 
@@ -118,26 +123,32 @@ jobs:
     - name: 💬 Comment PR
       if: github.event_name == 'pull_request' && success()
       uses: actions/github-script@v7
+      env:
+        BUILD_ID: ${{ steps.build.outputs.build_id }}
       with:
         script: |
           const fs = require('fs');
           const apkSize = fs.existsSync('./app-build.apk') 
             ? require('child_process').execSync('du -h ./app-build.apk').toString().split('\t')[0]
             : 'Unknown';
-          
+          const lines = [
+            '## 📱 Android Build Ready',
+            '',
+            '**Build completed successfully!**',
+            '- **Profile:** Preview',
+            `- **APK Size:** ${apkSize}`,
+            '- **Download:** Check the "Artifacts" section in this workflow run',
+            `- **Build ID:** ${process.env.BUILD_ID}`,
+            '',
+            'You can download and test the APK from the workflow artifacts.'
+          ];
+          const bodyText = lines.join('\n');
+
           github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            body: `## 📱 Android Build Ready
-            
-**Build completed successfully!**
-- **Profile:** Preview
-- **APK Size:** ${apkSize}
-- **Download:** Check the "Artifacts" section in this workflow run
-- **Build ID:** ${{ steps.build.outputs.build_id }}
-
-You can download and test the APK from the workflow artifacts.`
+            body: bodyText
           });
 
   notify-failure:
@@ -150,19 +161,25 @@ You can download and test the APK from the workflow artifacts.`
     - name: 💬 Comment PR on Failure
       if: github.event_name == 'pull_request'
       uses: actions/github-script@v7
+      env:
+        COMMIT_SHA: ${{ github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       with:
         script: |
+          const lines = [
+            '## ❌ Android Build Failed',
+            '',
+            'The Android build failed for this PR. Please check the workflow logs for details.',
+            '',
+            '**Build Details:**',
+            `- **Commit:** ${process.env.COMMIT_SHA}`,
+            `- **Workflow:** [View logs](${process.env.RUN_URL})`,
+            '',
+            'Please fix the issues and push again to trigger a new build.'
+          ];
           github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            body: `## ❌ Android Build Failed
-            
-The Android build failed for this PR. Please check the workflow logs for details.
-
-**Build Details:**
-- **Commit:** ${{ github.sha }}
-- **Workflow:** [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-Please fix the issues and push again to trigger a new build.`
+            body: lines.join('\n')
           });
