@@ -91,10 +91,22 @@ jobs:
         for i in {1..3}; do
           echo "Attempt $i to fetch build details..."
           # Try different command variations
-          if eas build:view "$ID" --json > build_view.json 2>&1; then
+          if eas build:view "$ID" --json > build_view_raw.json 2>&1; then
             echo "Successfully fetched build details"
-            break
-          elif eas build:view "$ID" > build_view_text.txt 2>&1; then
+            # Extract only the JSON part (everything from first { to last })
+            sed -n '/{/,/}/p' build_view_raw.json > build_view.json
+            # Verify we have valid JSON
+            if jq empty build_view.json 2>/dev/null; then
+              echo "Valid JSON extracted"
+              break
+            else
+              echo "Invalid JSON, trying text parsing..."
+              # Fall through to text parsing
+            fi
+          fi
+          
+          # Try text format parsing
+          if eas build:view "$ID" > build_view_text.txt 2>&1; then
             echo "Successfully fetched build details in text format"
             # Parse the artifact URL from text output
             ARTIFACT_LINE=$(grep "^Artifact" build_view_text.txt || echo "")
@@ -103,26 +115,26 @@ jobs:
               echo "Extracted artifact URL from text: $URL"
               # Create a simple JSON structure for consistency
               echo "{\"artifacts\":{\"buildUrl\":\"$URL\"}}" > build_view.json
+              break
             fi
-            break
-          else
-            echo "Failed to fetch build details (attempt $i)"
-            if [ $i -eq 3 ]; then
-              echo "All attempts failed. Build view output:"
-              cat build_view.json || echo "No build_view.json file created"
-              echo "Trying to get build info via API..."
-              # Try direct API call as fallback
-              curl -H "Authorization: Bearer $EXPO_TOKEN" \
-                   -H "Accept: application/json" \
-                   "https://api.expo.dev/v2/builds/$ID" > build_view.json 2>&1 || true
-              if [ -s build_view.json ]; then
-                echo "Got build info via API"
-                break
-              fi
-              exit 1
-            fi
-            sleep 10
           fi
+          
+          echo "Failed to fetch build details (attempt $i)"
+          if [ $i -eq 3 ]; then
+            echo "All attempts failed. Build view output:"
+            cat build_view.json || echo "No build_view.json file created"
+            echo "Trying to get build info via API..."
+            # Try direct API call as fallback
+            curl -H "Authorization: Bearer $EXPO_TOKEN" \
+                 -H "Accept: application/json" \
+                 "https://api.expo.dev/v2/builds/$ID" > build_view.json 2>&1 || true
+            if [ -s build_view.json ]; then
+              echo "Got build info via API"
+              break
+            fi
+            exit 1
+          fi
+          sleep 10
         done
         
         # Check if build_view.json has valid content
@@ -135,7 +147,9 @@ jobs:
         cat build_view.json
         
         # Try different JSON paths for the artifact URL
+        echo "Attempting to extract artifact URL from JSON..."
         URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // .data.artifacts.buildUrl // .data.artifacts.applicationArchiveUrl // .data.artifacts.appBuildUrl // empty' build_view.json 2>/dev/null)
+        echo "Extracted URL: '$URL'"
         
         # If JSON parsing failed, try to extract URL from text output
         if [ -z "$URL" ] || [ "$URL" = "null" ]; then
@@ -158,6 +172,10 @@ jobs:
         echo "Resolved artifact URL: $URL"
         
         # Determine file extension based on build type
+        echo "Profile: '${{ env.PROFILE }}'"
+        echo "URL contains .aab: $([[ "$URL" == *".aab"* ]] && echo "true" || echo "false")"
+        echo "Profile is production: $([[ "${{ env.PROFILE }}" == "production" ]] && echo "true" || echo "false")"
+        
         if [[ "$URL" == *".aab"* ]] || [[ "${{ env.PROFILE }}" == "production" ]]; then
           FILENAME="./app-build.aab"
         else
@@ -165,16 +183,28 @@ jobs:
         fi
         
         echo "Downloading to: $FILENAME"
-        curl -L "$URL" -o "$FILENAME"
-        
-        # Verify download
-        if [ -f "$FILENAME" ]; then
-          echo "Download successful. File size: $(du -h "$FILENAME" | cut -f1)"
-          echo "ARTIFACT_FILE=$FILENAME" >> $GITHUB_ENV
+        echo "Starting download..."
+        if curl -L "$URL" -o "$FILENAME"; then
+          echo "curl command completed successfully"
         else
-          echo "Download failed - file not found"
+          echo "curl command failed with exit code $?"
           exit 1
         fi
+        
+        # Verify download
+        echo "Checking if file exists: $FILENAME"
+        if [ -f "$FILENAME" ]; then
+          FILE_SIZE=$(du -h "$FILENAME" | cut -f1)
+          echo "Download successful. File size: $FILE_SIZE"
+          echo "ARTIFACT_FILE=$FILENAME" >> $GITHUB_ENV
+          echo "Successfully set ARTIFACT_FILE environment variable"
+        else
+          echo "Download failed - file not found"
+          ls -la . || true
+          exit 1
+        fi
+        
+        echo "Download step completed successfully"
 
     - name: 📊 Build Summary
       if: success()
