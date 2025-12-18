@@ -1,5 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { Alert, FlatList, KeyboardAvoidingView, Platform, Text, TextInput, TouchableOpacity, View, useColorScheme } from "react-native";
+import {
+  Alert,
+  FlatList,
+  KeyboardAvoidingView,
+  Platform,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+  useColorScheme,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Link, router } from "expo-router";
@@ -37,11 +47,13 @@ async function setActive(id: string) {
 
 function isPrivateIP(hostname: string): boolean {
   // Check for localhost variations
-  if (hostname === 'localhost' ||
-      hostname === 'localhost.localdomain' ||
-      hostname.endsWith('.localhost') ||
-      hostname === '0.0.0.0' ||
-      hostname.startsWith('127.')) {
+  if (
+    hostname === "localhost" ||
+    hostname === "localhost.localdomain" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "0.0.0.0" ||
+    hostname.startsWith("127.")
+  ) {
     return true;
   }
 
@@ -67,8 +79,8 @@ function isPrivateIP(hostname: string): boolean {
   }
 
   // Check for private/internal TLDs
-  const privateTlds = ['.internal', '.corp', '.home', '.lan'];
-  if (privateTlds.some(tld => hostname.endsWith(tld))) {
+  const privateTlds = [".internal", ".corp", ".home", ".lan"];
+  if (privateTlds.some((tld) => hostname.endsWith(tld))) {
     return true;
   }
 
@@ -154,27 +166,23 @@ export default function ServersScreen() {
     const { url: normalizedUrl, warning } = result;
 
     if (warning) {
-      Alert.alert(
-        "Security Warning",
-        `${warning}\n\nDo you want to continue adding this server?`,
-        [
-          {
-            text: "Cancel",
-            style: "cancel"
+      Alert.alert("Security Warning", `${warning}\n\nDo you want to continue adding this server?`, [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Add Anyway",
+          onPress: async () => {
+            const id = `${Date.now()}`;
+            const next = [...servers, { id, url: normalizedUrl, label: label || undefined }];
+            setLocalServers(next);
+            await setServers(next);
+            setUrl("");
+            setLabel("");
           },
-          {
-            text: "Add Anyway",
-            onPress: async () => {
-              const id = `${Date.now()}`;
-              const next = [...servers, { id, url: normalizedUrl, label: label || undefined }];
-              setLocalServers(next);
-              await setServers(next);
-              setUrl("");
-              setLabel("");
-            }
-          }
-        ]
-      );
+        },
+      ]);
     } else {
       const id = `${Date.now()}`;
       const next = [...servers, { id, url: normalizedUrl, label: label || undefined }];
@@ -186,7 +194,7 @@ export default function ServersScreen() {
   };
 
   const remove = async (id: string) => {
-    const next = servers.filter(s => s.id !== id);
+    const next = servers.filter((s) => s.id !== id);
     setLocalServers(next);
     await setServers(next);
     if (active === id) {
@@ -226,13 +234,16 @@ export default function ServersScreen() {
       await setSettings(host, { limitConversations: limit, rps, fullSyncOnLoad: formFullSync });
       Alert.alert("Saved", "Server settings updated.");
       setOpenSettingsFor(null);
-    } catch (e: any) {
-      Alert.alert("Error", String(e?.message || e || "Failed to save settings"));
+    } catch (error: unknown) {
+      Alert.alert(
+        "Error",
+        String(error instanceof Error ? error.message : error || "Failed to save settings")
+      );
     }
   };
 
   const proceed = () => {
-    const selected = servers.find(s => s.id === active);
+    const selected = servers.find((s) => s.id === active);
     if (!selected) {
       Alert.alert("Select a server", "Please select a server to continue.");
       return;
@@ -242,10 +253,17 @@ export default function ServersScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: C.bg }} edges={["top", "bottom"]}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
         <View style={{ padding: 16 }}>
-          <Text style={{ fontSize: 24, fontWeight: "600", marginBottom: 4, color: C.text }}>Open WebUI Client</Text>
-          <Text style={{ color: C.muted, marginBottom: 16 }}>Add one or more server URLs, select one, then Continue.</Text>
+          <Text style={{ fontSize: 24, fontWeight: "600", marginBottom: 4, color: C.text }}>
+            Open WebUI Client
+          </Text>
+          <Text style={{ color: C.muted, marginBottom: 16 }}>
+            Add one or more server URLs, select one, then Continue.
+          </Text>
 
           <View style={{ gap: 8, marginBottom: 12 }}>
             <TextInput
@@ -256,16 +274,38 @@ export default function ServersScreen() {
               value={url}
               onChangeText={setUrl}
               placeholderTextColor={C.muted}
-              style={{ borderWidth: 1, borderColor: C.border, backgroundColor: C.inputBg, color: C.text, borderRadius: 8, padding: 12 }}
+              style={{
+                borderWidth: 1,
+                borderColor: C.border,
+                backgroundColor: C.inputBg,
+                color: C.text,
+                borderRadius: 8,
+                padding: 12,
+              }}
             />
             <TextInput
               placeholder="Optional label (e.g., Production)"
               value={label}
               onChangeText={setLabel}
               placeholderTextColor={C.muted}
-              style={{ borderWidth: 1, borderColor: C.border, backgroundColor: C.inputBg, color: C.text, borderRadius: 8, padding: 12 }}
+              style={{
+                borderWidth: 1,
+                borderColor: C.border,
+                backgroundColor: C.inputBg,
+                color: C.text,
+                borderRadius: 8,
+                padding: 12,
+              }}
             />
-            <TouchableOpacity onPress={add} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8, alignItems: "center" }}>
+            <TouchableOpacity
+              onPress={add}
+              style={{
+                backgroundColor: "#111",
+                padding: 12,
+                borderRadius: 8,
+                alignItems: "center",
+              }}
+            >
               <Text style={{ color: "#fff", fontWeight: "600" }}>Add URL</Text>
             </TouchableOpacity>
           </View>
@@ -276,12 +316,31 @@ export default function ServersScreen() {
             renderItem={({ item }) => (
               <View style={{ paddingVertical: 10 }}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <TouchableOpacity onPress={() => activate(item.id)} style={{ width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: C.text, alignItems: "center", justifyContent: "center" }}>
-                    {active === item.id ? <View style={{ width: 12, height: 12, backgroundColor: C.text, borderRadius: 6 }} /> : null}
+                  <TouchableOpacity
+                    onPress={() => activate(item.id)}
+                    style={{
+                      width: 24,
+                      height: 24,
+                      borderRadius: 12,
+                      borderWidth: 2,
+                      borderColor: C.text,
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    {active === item.id ? (
+                      <View
+                        style={{ width: 12, height: 12, backgroundColor: C.text, borderRadius: 6 }}
+                      />
+                    ) : null}
                   </TouchableOpacity>
                   <View style={{ flex: 1 }}>
-                    <Text style={{ fontWeight: "600", color: C.text }}>{item.label || item.url}</Text>
-                    {item.label ? <Text style={{ color: C.muted, fontSize: 12 }}>{item.url}</Text> : null}
+                    <Text style={{ fontWeight: "600", color: C.text }}>
+                      {item.label || item.url}
+                    </Text>
+                    {item.label ? (
+                      <Text style={{ color: C.muted, fontSize: 12 }}>{item.url}</Text>
+                    ) : null}
                   </View>
                   <TouchableOpacity onPress={() => openSettings(item)}>
                     <Text style={{ color: C.primary, fontWeight: "600" }}>Settings</Text>
@@ -291,8 +350,20 @@ export default function ServersScreen() {
                   </TouchableOpacity>
                 </View>
                 {openSettingsFor === item.id ? (
-                  <View style={{ marginTop: 10, padding: 12, borderWidth: 1, borderColor: C.border, backgroundColor: C.cardBg, borderRadius: 8, gap: 8 }}>
-                    <Text style={{ fontWeight: "600", marginBottom: 4, color: C.text }}>Server Settings</Text>
+                  <View
+                    style={{
+                      marginTop: 10,
+                      padding: 12,
+                      borderWidth: 1,
+                      borderColor: C.border,
+                      backgroundColor: C.cardBg,
+                      borderRadius: 8,
+                      gap: 8,
+                    }}
+                  >
+                    <Text style={{ fontWeight: "600", marginBottom: 4, color: C.text }}>
+                      Server Settings
+                    </Text>
                     <View style={{ gap: 6 }}>
                       <Text style={{ color: C.muted }}>Conversation limit</Text>
                       <TextInput
@@ -301,7 +372,14 @@ export default function ServersScreen() {
                         value={formLimit}
                         onChangeText={setFormLimit}
                         placeholderTextColor={C.muted}
-                        style={{ borderWidth: 1, borderColor: C.border, backgroundColor: C.inputBg, color: C.text, borderRadius: 8, padding: 10 }}
+                        style={{
+                          borderWidth: 1,
+                          borderColor: C.border,
+                          backgroundColor: C.inputBg,
+                          color: C.text,
+                          borderRadius: 8,
+                          padding: 10,
+                        }}
                       />
                     </View>
                     <View style={{ gap: 6 }}>
@@ -312,20 +390,64 @@ export default function ServersScreen() {
                         value={formRps}
                         onChangeText={setFormRps}
                         placeholderTextColor={C.muted}
-                        style={{ borderWidth: 1, borderColor: C.border, backgroundColor: C.inputBg, color: C.text, borderRadius: 8, padding: 10 }}
+                        style={{
+                          borderWidth: 1,
+                          borderColor: C.border,
+                          backgroundColor: C.inputBg,
+                          color: C.text,
+                          borderRadius: 8,
+                          padding: 10,
+                        }}
                       />
                     </View>
-                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        marginTop: 6,
+                      }}
+                    >
                       <Text style={{ color: C.muted }}>Full sync on app load</Text>
-                      <TouchableOpacity onPress={() => setFormFullSync(v => !v)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: formFullSync ? C.primary : C.border, borderRadius: 14 }}>
-                        <Text style={{ color: formFullSync ? C.primary : C.text, fontWeight: "600" }}>{formFullSync ? 'On' : 'Off'}</Text>
+                      <TouchableOpacity
+                        onPress={() => setFormFullSync((v) => !v)}
+                        style={{
+                          paddingVertical: 6,
+                          paddingHorizontal: 10,
+                          borderWidth: 1,
+                          borderColor: formFullSync ? C.primary : C.border,
+                          borderRadius: 14,
+                        }}
+                      >
+                        <Text
+                          style={{ color: formFullSync ? C.primary : C.text, fontWeight: "600" }}
+                        >
+                          {formFullSync ? "On" : "Off"}
+                        </Text>
                       </TouchableOpacity>
                     </View>
                     <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
-                      <TouchableOpacity onPress={() => saveSettings(item)} style={{ backgroundColor: "#111", padding: 12, borderRadius: 8, alignItems: "center" }}>
+                      <TouchableOpacity
+                        onPress={() => saveSettings(item)}
+                        style={{
+                          backgroundColor: "#111",
+                          padding: 12,
+                          borderRadius: 8,
+                          alignItems: "center",
+                        }}
+                      >
                         <Text style={{ color: "#fff", fontWeight: "600" }}>Save</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity onPress={() => setOpenSettingsFor(null)} style={{ padding: 12, borderRadius: 8, alignItems: "center", borderWidth: 1, borderColor: C.border }}>
+                      <TouchableOpacity
+                        onPress={() => setOpenSettingsFor(null)}
+                        style={{
+                          padding: 12,
+                          borderRadius: 8,
+                          alignItems: "center",
+                          borderWidth: 1,
+                          borderColor: C.border,
+                        }}
+                      >
                         <Text style={{ color: C.text, fontWeight: "600" }}>Cancel</Text>
                       </TouchableOpacity>
                     </View>
@@ -334,11 +456,21 @@ export default function ServersScreen() {
               </View>
             )}
             ListEmptyComponent={<Text style={{ color: C.muted }}>No servers added yet.</Text>}
-            ItemSeparatorComponent={() => <View style={{ height: 1, backgroundColor: C.separator }} />}
+            ItemSeparatorComponent={() => (
+              <View style={{ height: 1, backgroundColor: C.separator }} />
+            )}
           />
 
           <View style={{ height: 12 }} />
-          <TouchableOpacity onPress={proceed} style={{ backgroundColor: C.primary, padding: 14, borderRadius: 10, alignItems: "center" }}>
+          <TouchableOpacity
+            onPress={proceed}
+            style={{
+              backgroundColor: C.primary,
+              padding: 14,
+              borderRadius: 10,
+              alignItems: "center",
+            }}
+          >
             <Text style={{ color: "#fff", fontWeight: "700" }}>Continue</Text>
           </TouchableOpacity>
 
@@ -354,5 +486,3 @@ export default function ServersScreen() {
     </SafeAreaView>
   );
 }
-
-

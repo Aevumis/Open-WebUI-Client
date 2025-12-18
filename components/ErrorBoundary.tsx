@@ -51,13 +51,9 @@ export class ErrorBoundary extends Component<Props, State> {
         <View style={styles.container}>
           <View style={styles.card}>
             <Text style={styles.title}>Something went wrong</Text>
-            <Text style={styles.message}>
-              We encountered an unexpected error.
-            </Text>
+            <Text style={styles.message}>We encountered an unexpected error.</Text>
             {this.state.error && (
-              <Text style={styles.errorText}>
-                {this.state.error.toString()}
-              </Text>
+              <Text style={styles.errorText}>{this.state.error.toString()}</Text>
             )}
             <TouchableOpacity style={styles.button} onPress={this.handleReset}>
               <Text style={styles.buttonText}>Return to Home</Text>

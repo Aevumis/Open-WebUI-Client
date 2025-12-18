@@ -1,5 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, FlatList, ScrollView, Text, TextInput, TouchableOpacity, View, useColorScheme } from "react-native";
+import {
+  ActivityIndicator,
+  FlatList,
+  ScrollView,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+  useColorScheme,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
 import { safeGetHost } from "../lib/url-utils";
@@ -7,39 +16,40 @@ import { router } from "expo-router";
 import { useNavigation } from "@react-navigation/native";
 import { isFullSyncDone } from "../lib/sync";
 import { getSettings } from "../lib/outbox";
+import { ServerItem } from "../lib/types";
 
 export default function OfflineScreen() {
-  const navigation = useNavigation<any>();
+  const navigation = useNavigation();
   const colorScheme = useColorScheme();
-  const isDark = colorScheme === 'dark';
+  const isDark = colorScheme === "dark";
   const C = isDark
     ? {
-        bg: '#0d0f12',
-        text: '#e6e6e6',
-        muted: '#9aa4b2',
-        border: '#2a2f36',
-        separator: '#1b1f24',
-        cardBg: '#14181d',
-        inputBg: '#0f1318',
-        primary: '#0a7ea4',
-        pillBg: '#1f2937',
-        pillActiveBg: '#0a7ea4',
-        pillText: '#e6e6e6',
-        pillActiveText: '#ffffff',
+        bg: "#0d0f12",
+        text: "#e6e6e6",
+        muted: "#9aa4b2",
+        border: "#2a2f36",
+        separator: "#1b1f24",
+        cardBg: "#14181d",
+        inputBg: "#0f1318",
+        primary: "#0a7ea4",
+        pillBg: "#1f2937",
+        pillActiveBg: "#0a7ea4",
+        pillText: "#e6e6e6",
+        pillActiveText: "#ffffff",
       }
     : {
-        bg: '#ffffff',
-        text: '#111111',
-        muted: '#666666',
-        border: '#e5e5e5',
-        separator: '#eeeeee',
-        cardBg: '#ffffff',
-        inputBg: '#ffffff',
-        primary: '#0a7ea4',
-        pillBg: '#f2f2f2',
-        pillActiveBg: '#0a7ea4',
-        pillText: '#333333',
-        pillActiveText: '#ffffff',
+        bg: "#ffffff",
+        text: "#111111",
+        muted: "#666666",
+        border: "#e5e5e5",
+        separator: "#eeeeee",
+        cardBg: "#ffffff",
+        inputBg: "#ffffff",
+        primary: "#0a7ea4",
+        pillBg: "#f2f2f2",
+        pillActiveBg: "#0a7ea4",
+        pillText: "#333333",
+        pillActiveText: "#ffffff",
       };
   const [items, setItems] = useState<CacheIndexItem[]>([]);
   const [titles, setTitles] = useState<Record<string, string>>({});
@@ -47,17 +57,21 @@ export default function OfflineScreen() {
   const [hostFilter, setHostFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
   const [initializing, setInitializing] = useState(true);
-  const [syncInfo, setSyncInfo] = useState<{host: string, syncDone: boolean, syncEnabled: boolean} | null>(null);
+  const [syncInfo, setSyncInfo] = useState<{
+    host: string;
+    syncDone: boolean;
+    syncEnabled: boolean;
+  } | null>(null);
 
   const goBackOrServers = () => {
     try {
-      if (navigation?.canGoBack?.()) {
-        navigation.goBack();
+      if ((navigation as any)?.canGoBack?.()) {
+        (navigation as any).goBack();
       } else {
-        router.replace('/servers' as any);
+        router.replace("/servers");
       }
     } catch {
-      router.replace('/servers' as any);
+      router.replace("/servers");
     }
   };
 
@@ -73,12 +87,13 @@ export default function OfflineScreen() {
           if (entry) {
             const t = entry.title || entry.data?.title || entry.data?.chat?.title;
             if (t) titleUpdates[it.key] = String(t);
-            const raw = entry.data?.updated_at
-              ?? entry.data?.updatedAt
-              ?? entry.data?.chat?.timestamp
-              ?? entry.data?.created_at
-              ?? entry.data?.timestamp
-              ?? entry.capturedAt;
+            const raw =
+              entry.data?.updated_at ??
+              entry.data?.updatedAt ??
+              entry.data?.chat?.timestamp ??
+              entry.data?.created_at ??
+              entry.data?.timestamp ??
+              entry.capturedAt;
             if (raw != null) {
               let v = Number(raw);
               if (Number.isFinite(v)) {
@@ -93,18 +108,22 @@ export default function OfflineScreen() {
       if (Object.keys(titleUpdates).length) setTitles((p) => ({ ...p, ...titleUpdates }));
       if (Object.keys(tsUpdates).length) setUpdatedMap((p) => ({ ...p, ...tsUpdates }));
       setItems(idx);
-      
+
       // Check sync status for empty state messaging
       if (idx.length === 0) {
         try {
           // Get the most recent server from storage to check sync status
-          const serversRaw = await import('@react-native-async-storage/async-storage').then(m => m.default.getItem('servers:list'));
-          const activeRaw = await import('@react-native-async-storage/async-storage').then(m => m.default.getItem('servers:active'));
+          const serversRaw = await import("@react-native-async-storage/async-storage").then((m) =>
+            m.default.getItem("servers:list")
+          );
+          const activeRaw = await import("@react-native-async-storage/async-storage").then((m) =>
+            m.default.getItem("servers:active")
+          );
           if (serversRaw && activeRaw) {
-            const servers = JSON.parse(serversRaw);
-            const activeServer = servers.find((s: any) => s.id === activeRaw);
+            const servers: ServerItem[] = JSON.parse(serversRaw);
+            const activeServer = servers.find((s) => s.id === activeRaw);
             if (activeServer) {
-              const host = safeGetHost(activeServer.url) || '';
+              const host = safeGetHost(activeServer.url) || "";
               const syncDone = await isFullSyncDone(activeServer.url);
               const settings = await getSettings(host);
               setSyncInfo({ host, syncDone, syncEnabled: settings.fullSyncOnLoad });
@@ -114,7 +133,7 @@ export default function OfflineScreen() {
           // Ignore errors in sync status check
         }
       }
-      
+
       setInitializing(false);
     })();
     return () => {
@@ -155,12 +174,13 @@ export default function OfflineScreen() {
           if (updatedMap[it.key] != null) return;
           const entry = await readCachedEntry(it.host, it.id);
           // Prefer updated_at from API JSON, then updatedAt, then chat.timestamp, then created_at, then top-level timestamp, then capturedAt
-          const raw = entry?.data?.updated_at
-            ?? entry?.data?.updatedAt
-            ?? entry?.data?.chat?.timestamp
-            ?? entry?.data?.created_at
-            ?? entry?.data?.timestamp
-            ?? entry?.capturedAt;
+          const raw =
+            entry?.data?.updated_at ??
+            entry?.data?.updatedAt ??
+            entry?.data?.chat?.timestamp ??
+            entry?.data?.created_at ??
+            entry?.data?.timestamp ??
+            entry?.capturedAt;
           if (raw != null) {
             let v = Number(raw);
             if (Number.isFinite(v)) {
@@ -203,7 +223,7 @@ export default function OfflineScreen() {
     if (!data) return;
     const href = `/offline/view?host=${encodeURIComponent(item.host)}&id=${encodeURIComponent(item.id)}`;
     // Cast to any to satisfy current route typings until typegen picks up new file
-    router.push(href as any);
+    router.push(href);
   };
 
   return (
@@ -223,102 +243,149 @@ export default function OfflineScreen() {
           </View>
         </View>
       ) : (
-      <FlatList
-        data={visibleItems}
-        keyExtractor={(it) => it.key}
-        keyboardShouldPersistTaps="handled"
-        stickyHeaderIndices={[0]}
-        ListHeaderComponent={
-          <View style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: C.separator, backgroundColor: C.bg }}>
-            <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
-              <TouchableOpacity onPress={goBackOrServers}>
-                <Text style={{ color: C.primary, fontWeight: "700" }}>{"\u2039"} Back</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={{ fontSize: 18, fontWeight: "700", color: C.text }}>Offline content</Text>
-            <Text style={{ color: C.muted }}>Cached conversations</Text>
-            <View style={{ marginTop: 12 }}>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
-                {[
-                  "all",
-                  ...hosts
-                ].map((h) => (
-                  <TouchableOpacity
-                    key={h}
-                    onPress={() => setHostFilter(h)}
-                    style={{
-                      paddingHorizontal: 12,
-                      paddingVertical: 6,
-                      borderRadius: 16,
-                      marginRight: 8,
-                      backgroundColor: hostFilter === h ? C.pillActiveBg : C.pillBg,
-                      borderWidth: hostFilter === h ? 0 : 1,
-                      borderColor: C.border,
-                    }}
-                  >
-                    <Text style={{ color: hostFilter === h ? C.pillActiveText : C.pillText, fontWeight: "600" }}>{h === "all" ? "All" : h}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-              <View style={{ borderWidth: 1, borderColor: C.border, backgroundColor: C.inputBg, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
-                <TextInput
-                  placeholder="Search by title or ID"
-                  value={query}
-                  onChangeText={setQuery}
-                  placeholderTextColor={C.muted}
-                  style={{ padding: 0, color: C.text }}
-                />
+        <FlatList
+          data={visibleItems}
+          keyExtractor={(it) => it.key}
+          keyboardShouldPersistTaps="handled"
+          stickyHeaderIndices={[0]}
+          ListHeaderComponent={
+            <View
+              style={{
+                padding: 16,
+                borderBottomWidth: 1,
+                borderBottomColor: C.separator,
+                backgroundColor: C.bg,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
+                <TouchableOpacity onPress={goBackOrServers}>
+                  <Text style={{ color: C.primary, fontWeight: "700" }}>{"\u2039"} Back</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={{ fontSize: 18, fontWeight: "700", color: C.text }}>
+                Offline content
+              </Text>
+              <Text style={{ color: C.muted }}>Cached conversations</Text>
+              <View style={{ marginTop: 12 }}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ marginBottom: 10 }}
+                >
+                  {["all", ...hosts].map((h) => (
+                    <TouchableOpacity
+                      key={h}
+                      onPress={() => setHostFilter(h)}
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingVertical: 6,
+                        borderRadius: 16,
+                        marginRight: 8,
+                        backgroundColor: hostFilter === h ? C.pillActiveBg : C.pillBg,
+                        borderWidth: hostFilter === h ? 0 : 1,
+                        borderColor: C.border,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: hostFilter === h ? C.pillActiveText : C.pillText,
+                          fontWeight: "600",
+                        }}
+                      >
+                        {h === "all" ? "All" : h}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <View
+                  style={{
+                    borderWidth: 1,
+                    borderColor: C.border,
+                    backgroundColor: C.inputBg,
+                    borderRadius: 8,
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                  }}
+                >
+                  <TextInput
+                    placeholder="Search by title or ID"
+                    value={query}
+                    onChangeText={setQuery}
+                    placeholderTextColor={C.muted}
+                    style={{ padding: 0, color: C.text }}
+                  />
+                </View>
               </View>
             </View>
-          </View>
-        }
-        renderItem={({ item }) => (
-          <TouchableOpacity onPress={() => open(item)} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: C.separator }}>
-            <Text style={{ fontWeight: "700", color: C.text }} numberOfLines={1}>
-              {titles[item.key] || item.title || item.id}
-            </Text>
-            <Text style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>
-              {(() => {
-                const ts = updatedMap[item.key] ?? item.lastAccess;
-                return `Last updated: ${new Date(ts).toLocaleString()}`;
-              })()}
-            </Text>
-          </TouchableOpacity>
-        )}
-        ListEmptyComponent={
-          <View style={{ padding: 16, alignItems: 'center' }}>
-            <Text style={{ color: C.muted, textAlign: 'center', marginBottom: 12 }}>No cached conversations yet.</Text>
-            {syncInfo && (
-              <View style={{ alignItems: 'center' }}>
-                {!syncInfo.syncEnabled ? (
-                  <View style={{ alignItems: 'center' }}>
-                    <Text style={{ color: C.muted, textAlign: 'center', fontSize: 14 }}>
-                      Sync is disabled for this server.
+          }
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              onPress={() => open(item)}
+              style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: C.separator }}
+            >
+              <Text style={{ fontWeight: "700", color: C.text }} numberOfLines={1}>
+                {titles[item.key] || item.title || item.id}
+              </Text>
+              <Text style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>
+                {(() => {
+                  const ts = updatedMap[item.key] ?? item.lastAccess;
+                  return `Last updated: ${new Date(ts).toLocaleString()}`;
+                })()}
+              </Text>
+            </TouchableOpacity>
+          )}
+          ListEmptyComponent={
+            <View style={{ padding: 16, alignItems: "center" }}>
+              <Text style={{ color: C.muted, textAlign: "center", marginBottom: 12 }}>
+                No cached conversations yet.
+              </Text>
+              {syncInfo && (
+                <View style={{ alignItems: "center" }}>
+                  {!syncInfo.syncEnabled ? (
+                    <View style={{ alignItems: "center" }}>
+                      <Text style={{ color: C.muted, textAlign: "center", fontSize: 14 }}>
+                        Sync is disabled for this server.
+                      </Text>
+                      <Text
+                        style={{ color: C.muted, textAlign: "center", fontSize: 14, marginTop: 4 }}
+                      >
+                        Enable &quot;Full sync on app load&quot; in server settings to cache
+                        conversations.
+                      </Text>
+                    </View>
+                  ) : !syncInfo.syncDone ? (
+                    <View style={{ alignItems: "center" }}>
+                      <ActivityIndicator
+                        size="small"
+                        color={C.primary}
+                        style={{ marginBottom: 8 }}
+                      />
+                      <Text
+                        style={{
+                          color: C.primary,
+                          textAlign: "center",
+                          fontSize: 14,
+                          fontWeight: "600",
+                        }}
+                      >
+                        Initial sync in progress...
+                      </Text>
+                      <Text
+                        style={{ color: C.muted, textAlign: "center", fontSize: 12, marginTop: 4 }}
+                      >
+                        Downloading conversations from {syncInfo.host}
+                      </Text>
+                    </View>
+                  ) : (
+                    <Text style={{ color: C.muted, textAlign: "center", fontSize: 14 }}>
+                      Sync completed but no conversations found on {syncInfo.host}
                     </Text>
-                    <Text style={{ color: C.muted, textAlign: 'center', fontSize: 14, marginTop: 4 }}>
-                      Enable &quot;Full sync on app load&quot; in server settings to cache conversations.
-                    </Text>
-                  </View>
-                ) : !syncInfo.syncDone ? (
-                  <View style={{ alignItems: 'center' }}>
-                    <ActivityIndicator size="small" color={C.primary} style={{ marginBottom: 8 }} />
-                    <Text style={{ color: C.primary, textAlign: 'center', fontSize: 14, fontWeight: '600' }}>
-                      Initial sync in progress...
-                    </Text>
-                    <Text style={{ color: C.muted, textAlign: 'center', fontSize: 12, marginTop: 4 }}>
-                      Downloading conversations from {syncInfo.host}
-                    </Text>
-                  </View>
-                ) : (
-                  <Text style={{ color: C.muted, textAlign: 'center', fontSize: 14 }}>
-                    Sync completed but no conversations found on {syncInfo.host}
-                  </Text>
-                )}
-              </View>
-            )}
-          </View>
-        }
-      />
+                  )}
+                </View>
+              )}
+            </View>
+          }
+        />
       )}
     </SafeAreaView>
   );

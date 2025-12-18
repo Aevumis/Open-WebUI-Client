@@ -1,14 +1,16 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { debug as logDebug, info as logInfo, warn as logWarn } from "./log";
-import { 
-  OUTBOX_LOCK_TIMEOUT, 
-  MAX_OUTBOX_ITEMS, 
-  OUTBOX_ITEM_TTL, 
-  OUTBOX_MAX_RETRIES, 
-  DEFAULT_LIMIT_CONVERSATIONS, 
-  DEFAULT_RPS 
+import {
+  OUTBOX_LOCK_TIMEOUT,
+  MAX_OUTBOX_ITEMS,
+  OUTBOX_ITEM_TTL,
+  OUTBOX_MAX_RETRIES,
+  DEFAULT_LIMIT_CONVERSATIONS,
+  DEFAULT_RPS,
 } from "./constants";
 import { safeGetHost } from "./url-utils";
+import { STORAGE_KEYS } from "./storage-keys";
+import { ChatCompletionRequest, ServerSettings } from "./types";
 
 // Mutex implementation to prevent race conditions in outbox operations
 // Each host gets its own lock to allow concurrent operations across different hosts
@@ -47,10 +49,7 @@ async function acquireLock(host: string): Promise<() => void> {
   });
 
   // Return the release function, but ensure we don't timeout while getting it
-  return Promise.race([
-    Promise.resolve(releaseLock!),
-    timeoutPromise
-  ]);
+  return Promise.race([Promise.resolve(releaseLock!), timeoutPromise]);
 }
 
 /**
@@ -73,27 +72,26 @@ async function withOutboxLock<T>(host: string, fn: () => Promise<T>): Promise<T>
 export type OutboxItem = {
   id: string; // local UUID
   chatId: string;
-  body: any; // JSON payload for /api/chat/completions
+  body: ChatCompletionRequest; // JSON payload for /api/chat/completions
   createdAt: number;
   tries: number;
   lastError?: string;
   // Note: Items have a TTL (7 days) and max retry limit (10 attempts)
 };
 
-const TOKEN_KEY = (host: string) => `authToken:${host}`;
-const OUTBOX_KEY = (host: string) => `outbox:${host}`;
-const SETTINGS_KEY = (host: string) => `server:settings:${host}`;
-
-export type ServerSettings = {
-  limitConversations: number; // default 30
-  rps: number; // default 5
-  fullSyncOnLoad: boolean; // default true
-};
-
+/**
+ * Retrieves the server settings for a specific host.
+ * @param host - The host to get settings for
+ * @returns ServerSettings object (with defaults if none stored)
+ */
 export async function getSettings(host: string): Promise<ServerSettings> {
-  const defaults: ServerSettings = { limitConversations: DEFAULT_LIMIT_CONVERSATIONS, rps: DEFAULT_RPS, fullSyncOnLoad: true };
+  const defaults: ServerSettings = {
+    limitConversations: DEFAULT_LIMIT_CONVERSATIONS,
+    rps: DEFAULT_RPS,
+    fullSyncOnLoad: true,
+  };
   try {
-    const raw = await AsyncStorage.getItem(SETTINGS_KEY(host));
+    const raw = await AsyncStorage.getItem(STORAGE_KEYS.serverSettings(host));
     if (raw) {
       const parsed = JSON.parse(raw);
       // Merge with defaults to remain compatible with older stored values
@@ -103,23 +101,38 @@ export async function getSettings(host: string): Promise<ServerSettings> {
   return defaults;
 }
 
+/**
+ * Updates the server settings for a specific host.
+ * @param host - The host to update settings for
+ * @param settings - Partial settings object to merge
+ */
 export async function setSettings(host: string, settings: Partial<ServerSettings>) {
   const current = await getSettings(host);
   const next = { ...current, ...settings };
-  await AsyncStorage.setItem(SETTINGS_KEY(host), JSON.stringify(next));
+  await AsyncStorage.setItem(STORAGE_KEYS.serverSettings(host), JSON.stringify(next));
 }
 
+/**
+ * Stores the authentication token for a host.
+ * @param host - The host the token belongs to
+ * @param token - The Bearer token
+ */
 export async function setToken(host: string, token: string) {
-  await AsyncStorage.setItem(TOKEN_KEY(host), token);
+  await AsyncStorage.setItem(STORAGE_KEYS.authToken(host), token);
 }
 
+/**
+ * Retrieves the stored authentication token for a host.
+ * @param host - The host to get the token for
+ * @returns The token or null if not found
+ */
 export async function getToken(host: string): Promise<string | null> {
-  return AsyncStorage.getItem(TOKEN_KEY(host));
+  return AsyncStorage.getItem(STORAGE_KEYS.authToken(host));
 }
 
 async function getOutbox(host: string): Promise<OutboxItem[]> {
   try {
-    const raw = await AsyncStorage.getItem(OUTBOX_KEY(host));
+    const raw = await AsyncStorage.getItem(STORAGE_KEYS.outbox(host));
     return raw ? (JSON.parse(raw) as OutboxItem[]) : [];
   } catch {
     return [];
@@ -127,7 +140,7 @@ async function getOutbox(host: string): Promise<OutboxItem[]> {
 }
 
 async function setOutbox(host: string, items: OutboxItem[]) {
-  await AsyncStorage.setItem(OUTBOX_KEY(host), JSON.stringify(items));
+  await AsyncStorage.setItem(STORAGE_KEYS.outbox(host), JSON.stringify(items));
 }
 
 /**
@@ -142,25 +155,25 @@ async function cleanupOutbox(host: string): Promise<number> {
     const now = Date.now();
 
     // Filter out items that are too old or have too many retries
-    let filtered = list.filter(item => {
-      const isExpired = (now - item.createdAt) > OUTBOX_ITEM_TTL;
+    let filtered = list.filter((item) => {
+      const isExpired = now - item.createdAt > OUTBOX_ITEM_TTL;
       const hasTooManyRetries = item.tries >= OUTBOX_MAX_RETRIES;
 
       if (isExpired || hasTooManyRetries) {
         if (isExpired) {
-          logDebug('outbox', 'removing expired item', {
+          logDebug("outbox", "removing expired item", {
             id: item.id,
             chatId: item.chatId,
             ageMs: now - item.createdAt,
-            maxAgeMs: OUTBOX_ITEM_TTL
+            maxAgeMs: OUTBOX_ITEM_TTL,
           });
         }
         if (hasTooManyRetries) {
-          logDebug('outbox', 'removing item with too many retries', {
+          logDebug("outbox", "removing item with too many retries", {
             id: item.id,
             chatId: item.chatId,
             retries: item.tries,
-            maxRetries: OUTBOX_MAX_RETRIES
+            maxRetries: OUTBOX_MAX_RETRIES,
           });
         }
         return false;
@@ -174,27 +187,27 @@ async function cleanupOutbox(host: string): Promise<number> {
       const itemsToRemove = filtered.length - MAX_OUTBOX_ITEMS;
       // Sort by creation time (oldest first) and remove excess items
       const sortedByAge = [...filtered].sort((a, b) => a.createdAt - b.createdAt);
-      const oldestIds = sortedByAge.slice(0, itemsToRemove).map(item => item.id);
+      const oldestIds = sortedByAge.slice(0, itemsToRemove).map((item) => item.id);
 
-      filtered = filtered.filter(item => !oldestIds.includes(item.id));
+      filtered = filtered.filter((item) => !oldestIds.includes(item.id));
       removedCount += itemsToRemove;
 
-      logInfo('outbox', 'removing oldest items due to size limit', {
+      logInfo("outbox", "removing oldest items due to size limit", {
         host,
         itemsRemoved: itemsToRemove,
         totalItems: MAX_OUTBOX_ITEMS,
-        oldestItemAge: now - sortedByAge[0].createdAt
+        oldestItemAge: now - sortedByAge[0].createdAt,
       });
     }
 
     // Write back the cleaned outbox if anything was removed
     if (removedCount > 0) {
       await setOutbox(host, filtered);
-      logInfo('outbox', 'cleanup completed', {
+      logInfo("outbox", "cleanup completed", {
         host,
         itemsRemoved: removedCount,
         originalCount: list.length,
-        finalCount: filtered.length
+        finalCount: filtered.length,
       });
     }
 
@@ -202,12 +215,20 @@ async function cleanupOutbox(host: string): Promise<number> {
   });
 }
 
-// Expose read-only snapshot for external drains (e.g., WebView-assisted)
+/**
+ * Returns a snapshot of the current outbox for a host.
+ * @param host - The host to list items for
+ * @returns Array of outbox items
+ */
 export async function listOutbox(host: string): Promise<OutboxItem[]> {
   return getOutbox(host);
 }
 
-// Remove specific items by id after successful send
+/**
+ * Removes specific items from the outbox.
+ * @param host - The host to remove items from
+ * @param ids - Array of item IDs to remove
+ */
 export async function removeOutboxItems(host: string, ids: string[]) {
   return withOutboxLock(host, async () => {
     const list = await getOutbox(host);
@@ -216,6 +237,11 @@ export async function removeOutboxItems(host: string, ids: string[]) {
   });
 }
 
+/**
+ * Adds a new item to the outbox for background sending.
+ * @param host - The host to send the item to
+ * @param item - The item details (without tries/createdAt)
+ */
 export async function enqueue(host: string, item: Omit<OutboxItem, "tries" | "createdAt">) {
   return withOutboxLock(host, async () => {
     const list = await getOutbox(host);
@@ -226,15 +252,20 @@ export async function enqueue(host: string, item: Omit<OutboxItem, "tries" | "cr
     // Clean up old/failed items after adding the new one
     const removedCount = await cleanupOutbox(host);
     if (removedCount > 0) {
-      logDebug('outbox', 'cleanup after enqueue', {
+      logDebug("outbox", "cleanup after enqueue", {
         host,
         itemsRemoved: removedCount,
-        newId: next.id
+        newId: next.id,
       });
     }
   });
 }
 
+/**
+ * Returns the number of items currently in the outbox for a host.
+ * @param host - The host to count items for
+ * @returns The count of items
+ */
 export async function count(host: string) {
   return withOutboxLock(host, async () => {
     const list = await getOutbox(host);
@@ -246,10 +277,16 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Attempts to send all queued items in the outbox to the server.
+ * Respects rate limits and stops on authentication errors.
+ * @param baseUrl - The base URL of the server
+ * @returns Object with counts of sent and remaining items
+ */
 export async function drain(baseUrl: string): Promise<{ sent: number; remaining: number }> {
   const host = safeGetHost(baseUrl);
   if (!host) {
-    logInfo('outbox', 'drain invalid url', { baseUrl });
+    logInfo("outbox", "drain invalid url", { baseUrl });
     return { sent: 0, remaining: 0 };
   }
 
@@ -257,15 +294,15 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
     // Clean up old/failed items before processing
     const removedCount = await cleanupOutbox(host);
     if (removedCount > 0) {
-      logInfo('outbox', 'cleanup before drain', {
+      logInfo("outbox", "cleanup before drain", {
         host,
-        itemsRemoved: removedCount
+        itemsRemoved: removedCount,
       });
     }
 
     const token = await getToken(host);
     if (!token) {
-      logInfo('outbox', 'drain no token, abort', { host });
+      logInfo("outbox", "drain no token, abort", { host });
       return { sent: 0, remaining: (await getOutbox(host)).length };
     }
 
@@ -277,7 +314,13 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
 
     let sent = 0;
     const serviceUrl = `${baseUrl.replace(/\/$/, "")}/api/chat/completions`;
-    logInfo('outbox', 'drain start', { host, serviceUrl, tokenPresent: !!token, initial: list.length, rps });
+    logInfo("outbox", "drain start", {
+      host,
+      serviceUrl,
+      tokenPresent: !!token,
+      initial: list.length,
+      rps,
+    });
 
     for (let i = 0; i < list.length; i++) {
       const it = list[i];
@@ -300,31 +343,35 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
           list.splice(i, 1);
           i--;
           await setOutbox(host, list);
-          logDebug('outbox', 'sent', { id: it.id, chatId: it.chatId, status: res.status });
+          logDebug("outbox", "sent", { id: it.id, chatId: it.chatId, status: res.status });
         } else if (res.status === 401) {
           // auth invalid; stop draining
-          logWarn('outbox', 'unauthorized (401), stopping');
+          logWarn("outbox", "unauthorized (401), stopping");
           throw new Error(`Unauthorized (401)`);
         } else {
           // keep for retry
           it.tries += 1;
           it.lastError = `HTTP ${res.status}`;
           await setOutbox(host, list);
-          logDebug('outbox', 'keep for retry', { id: it.id, chatId: it.chatId, status: res.status });
+          logDebug("outbox", "keep for retry", {
+            id: it.id,
+            chatId: it.chatId,
+            status: res.status,
+          });
         }
-      } catch (e: any) {
+      } catch (error: unknown) {
         // network or auth error; keep and stop early
         it.tries += 1;
-        it.lastError = e?.message || String(e);
+        it.lastError = error instanceof Error ? error.message : String(error);
         await setOutbox(host, list);
-        logWarn('outbox', 'error', { id: it.id, chatId: it.chatId, error: it.lastError });
+        logWarn("outbox", "error", { id: it.id, chatId: it.chatId, error: it.lastError });
         break;
       }
       if (minInterval) await sleep(minInterval);
     }
 
     const remaining = (await getOutbox(host)).length;
-    logInfo('outbox', 'drain done', { sent, remaining });
+    logInfo("outbox", "drain done", { sent, remaining });
     return { sent, remaining };
   });
 }

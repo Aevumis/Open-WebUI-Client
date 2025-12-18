@@ -1,6 +1,12 @@
 import React, { useCallback, useMemo, useRef } from "react";
 import { Alert, Platform, useColorScheme } from "react-native";
-import WebView, { WebViewMessageEvent } from "react-native-webview";
+import {
+  WebView,
+  WebViewMessageEvent,
+  type WebViewPermissionRequest 
+} from "react-native-webview";
+import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
+
 import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
@@ -8,28 +14,39 @@ import { Camera } from "expo-camera";
 import * as MediaLibrary from "expo-media-library";
 import { cacheApiResponse, type CachedEntry } from "../lib/cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
+import {
+  enqueue,
+  setToken,
+  count,
+  getToken,
+  listOutbox,
+  removeOutboxItems,
+  getSettings,
+} from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
 import Toast from "react-native-toast-message";
 import * as Haptics from "expo-haptics";
-import { 
-  WEBVIEW_LOAD_TIMEOUT, 
-  AUTH_POLLING_INTERVAL, 
+import {
+  WEBVIEW_LOAD_TIMEOUT,
+  AUTH_POLLING_INTERVAL,
   AUTH_CAPTURE_TIMEOUT,
-  SW_READY_WAIT, 
+  SW_READY_WAIT,
   SW_DETECTION_DELAY,
   WEBVIEW_DRAIN_TIMEOUT,
   WEBVIEW_DRAIN_CHECK_INTERVAL
 } from "../lib/constants";
 import { safeGetHost, safeParseUrl } from "../lib/url-utils";
+import { STORAGE_KEYS } from "../lib/storage-keys";
+import { getErrorMessage } from "../lib/error-utils";
 
 // WebView debug logs are now gated via centralized logger scopes/levels
+
 
 function buildInjection(baseUrl: string) {
   // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
   // Post messages to React Native with type keys for native handling.
   const h = safeGetHost(baseUrl);
-  const allowedHost = JSON.stringify(h || '');
+  const allowedHost = JSON.stringify(h || "");
   return `(() => {
     try {
       if (window.__owui_injected) {
@@ -596,10 +613,10 @@ function buildInjection(baseUrl: string) {
 // - Applies html class 'dark', data-theme attribute, and color-scheme style/meta
 // - Respects explicit user choice in localStorage ('light'|'dark'); only overrides null/system/auto
 // - Exposes window.__owui_notifyThemeChange(isDark) to re-assert later
-function buildThemeBootstrap(scheme: 'dark' | 'light' | null) {
-  const isDark = scheme === 'dark';
+function buildThemeBootstrap(scheme: "dark" | "light" | null) {
+  const isDark = scheme === "dark";
   return `(() => { try {
-    var isDark = ${isDark ? 'true' : 'false'};
+    var isDark = ${isDark ? "true" : "false"};
     try { window.__owui_rnColorScheme = isDark ? 'dark' : 'light'; } catch(_){ }
     try {
       var listeners = new Set();
@@ -651,43 +668,53 @@ function buildThemeBootstrap(scheme: 'dark' | 'light' | null) {
   } catch(_){ } })();`;
 }
 
-export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: { baseUrl: string; online: boolean; onQueueCountChange?: (count: number) => void }) {
+export default function OpenWebUIView({
+  baseUrl,
+  online,
+  onQueueCountChange,
+}: {
+  baseUrl: string;
+  online: boolean;
+  onQueueCountChange?: (count: number) => void;
+}) {
   const webref = useRef<WebView>(null);
   const drainingRef = React.useRef(false);
   const syncingRef = React.useRef(false);
   const baseUrlRef = React.useRef(baseUrl);
-  React.useEffect(() => { baseUrlRef.current = baseUrl; }, [baseUrl]);
+  React.useEffect(() => {
+    baseUrlRef.current = baseUrl;
+  }, [baseUrl]);
   const colorScheme = useColorScheme();
-  const isAndroid = Platform.OS === 'android';
-  const dev = (typeof __DEV__ !== 'undefined' && __DEV__);
+  const isAndroid = Platform.OS === "android";
+  const dev = typeof __DEV__ !== "undefined" && __DEV__;
 
   // Mount-time visibility and permission setup
   React.useEffect(() => {
     try {
-      logInfo('webview', 'mount', { baseUrl });
-      
+      logInfo("webview", "mount", { baseUrl });
+
       // Proactively request camera and microphone permissions on mount
       // This ensures permissions are available when the WebView needs them
       (async () => {
         try {
           const cameraPermission = await Camera.requestCameraPermissionsAsync();
           const microphonePermission = await Camera.requestMicrophonePermissionsAsync();
-          
-          logInfo('permissions', 'proactive permission request', {
+
+          logInfo("permissions", "proactive permission request", {
             camera: cameraPermission.status,
-            microphone: microphonePermission.status
+            microphone: microphonePermission.status,
           });
-          
-          if (cameraPermission.status !== 'granted' || microphonePermission.status !== 'granted') {
+
+          if (cameraPermission.status !== "granted" || microphonePermission.status !== "granted") {
             Toast.show({
-              type: 'info',
-              text1: 'Camera/Microphone Access',
-              text2: 'Some features may require camera and microphone permissions.',
+              type: "info",
+              text1: "Camera/Microphone Access",
+              text2: "Some features may require camera and microphone permissions.",
               visibilityTime: 4000,
             });
           }
         } catch (error) {
-          logDebug('permissions', 'proactive request error', { error: String(error) });
+          logDebug("permissions", "proactive request error", { error: getErrorMessage(error) });
         }
       })();
     } catch {}
@@ -699,9 +726,14 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       const host = safeGetHost(baseUrlRef.current);
       if (!host) return;
       const items = await listOutbox(host);
-      if (!items.length) { drainingRef.current = false; return; }
-      const batch = items.slice(0, 3).map((it) => ({ id: it.id, chatId: it.chatId, body: it.body }));
-      logInfo('webviewDrain', 'sending batch', { size: batch.length });
+      if (!items.length) {
+        drainingRef.current = false;
+        return;
+      }
+      const batch = items
+        .slice(0, 3)
+        .map((it) => ({ id: it.id, chatId: it.chatId, body: it.body }));
+      logInfo("webviewDrain", "sending batch", { size: batch.length });
       const js = `(() => { (async function(){
         function findInput() {
           const selectors = ['textarea', '[contenteditable="true"]', '[role="textbox"]', '#chat-input'];
@@ -775,7 +807,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
           }
           window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'drainBatchResult', successIds: okIds }));
         } catch (e) {
-          try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'drainBatchError', error: String(e && e.message || e) })); } catch (_) {}
+          try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'drainBatchError', error: getErrorMessage(e) })); } catch (_) {}
         }
       })(); })();`;
       webref.current?.injectJavaScript(js);
@@ -795,7 +827,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
           if (window.__owui_syncing) { post({ type: 'debug', scope: 'injection', event: 'syncSkipAlreadyRunning' }); return; }
           window.__owui_syncing = true;
           post({ type: 'debug', scope: 'injection', event: 'syncStart' });
-          const LIMIT = ${Number.isFinite(0) ? '' : ''}${limitConversations};
+          const LIMIT = ${Number.isFinite(0) ? "" : ""}${limitConversations};
           const MIN = ${minInterval};
           let page = 1;
           const chats = [];
@@ -836,7 +868,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
           }
           post({ type: 'syncDone', conversations: chats.length, messages });
         } catch (e) {
-          try { post({ type: 'debug', scope: 'injection', event: 'syncError', message: String(e && e.message || e) }); } catch(_){}
+          try { post({ type: 'debug', scope: 'injection', event: 'syncError', message: getErrorMessage(e) }); } catch(_){}
         } finally {
           try { window.__owui_syncing = false; } catch(_){ }
         }
@@ -846,202 +878,242 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
     } catch {}
   }, []);
 
-  const onMessage = useCallback(async (e: WebViewMessageEvent) => {
-    try {
-      const msg = JSON.parse(e.nativeEvent.data || '{}');
-      const host = safeGetHost(baseUrl);
-      if (!host) return;
-      if (msg.type === 'debug') {
-        logDebug('webview', 'debug', msg);
-        try {
-          if ((msg.event === 'injected' || msg.event === 'hasInjected') && !syncingRef.current) {
-            const tok = await getToken(host);
-            const settings = await getSettings(host);
-            if (!tok && settings.fullSyncOnLoad) {
-              await injectWebSync();
-            } else if (!settings.fullSyncOnLoad) {
-              logInfo('sync', 'fullSyncOnLoad disabled, skip webview-assisted sync');
-            }
-          }
-        } catch {}
-        return;
-      }
-      if (msg.type === 'swStatus') {
-        logInfo('webview', 'swStatus', msg);
-        try {
-          const key = `swhint:${host}`;
-          const pendingKey = `${key}:pending`;
-          const shownCount = parseInt(await AsyncStorage.getItem(key) || '0');
-          
-          // If this is an "unsupported" detection (early timing issue), delay the warning
-          if (msg.method === 'unsupported') {
-            const existingPending = await AsyncStorage.getItem(pendingKey);
-            if (!existingPending) {
-              await AsyncStorage.setItem(pendingKey, String(Date.now()));
-              logInfo('webview', 'swUnsupportedPending', { host, delayingWarning: true });
-              
-              // Wait 3 seconds, then check if we got a better detection
-              setTimeout(async () => {
-                try {
-                  const stillPending = await AsyncStorage.getItem(pendingKey);
-                  if (stillPending) {
-                    // No better detection came in, show the warning
-                    await AsyncStorage.removeItem(pendingKey);
-                    const currentCount = parseInt(await AsyncStorage.getItem(key) || '0');
-                    if (currentCount < 2) {
-                      await AsyncStorage.setItem(key, String(currentCount + 1));
-                      Toast.show({
-                        type: 'info',
-                        text1: 'Service Worker not supported',
-                        text2: 'Your browser may not support Service Workers. Tap to learn more.',
-                        onPress: async () => {
-                          try { await WebBrowser.openBrowserAsync('https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw'); } catch {}
-                        },
-                      });
-                      logInfo('webview', 'swDelayedWarningShown', { host, method: 'unsupported', shownCount: currentCount + 1 });
-                    }
-                  }
-                } catch {}
-              }, SW_DETECTION_DELAY);
-            }
-            return;
-          }
-          
-          // Clear any pending unsupported warning since we got a real detection
-          await AsyncStorage.removeItem(pendingKey);
-          
-          // Only show toast if:
-          // 1. SW file doesn't exist OR SW exists but isn't functional
-          // 2. Haven't shown this warning more than 2 times for this host
-          // 3. Give preference to functional check over file existence
-          const shouldWarn = (!msg.hasSW || (msg.hasSW && msg.swFunctional === false)) && shownCount < 2;
-          
-          if (shouldWarn) {
-            await AsyncStorage.setItem(key, String(shownCount + 1));
-            const warningText = !msg.hasSW 
-              ? 'Service Worker not found on server'
-              : 'Service Worker found but not working properly';
-            
-            Toast.show({
-              type: 'info',
-              text1: 'Offline mode not fully enabled',
-              text2: `${warningText}. Tap to learn more.`,
-              onPress: async () => {
-                try { await WebBrowser.openBrowserAsync('https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw'); } catch {}
-              },
-            });
-            
-            logInfo('webview', 'swWarningShown', { 
-              host, 
-              hasSW: msg.hasSW, 
-              swFunctional: msg.swFunctional, 
-              method: msg.method, 
-              shownCount: shownCount + 1 
-            });
-          } else if (msg.hasSW && msg.swFunctional !== false) {
-            // SW appears to be working, clear any previous warning count
-            await AsyncStorage.removeItem(key);
-            logInfo('webview', 'swWorking', { host, method: msg.method });
-          }
-        } catch {}
-        return;
-      }
-      if (msg.type === 'drainBatchResult' && Array.isArray(msg.successIds)) {
-        await removeOutboxItems(host, msg.successIds);
-        const remaining = await count(host);
-        const token = await getToken(host);
-        logInfo('webviewDrain', 'batch result', { removed: msg.successIds.length, remaining });
-        try {
-          if (msg.successIds.length > 0) {
-            try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); } catch {}
-            Toast.show({ type: 'success', text1: `Sent ${msg.successIds.length} queued` });
-          }
-        } catch {}
-        try { onQueueCountChange && onQueueCountChange(remaining); } catch {}
-        if (!token && remaining > 0) {
-          await injectWebDrainBatch();
-        } else {
-          drainingRef.current = false;
-        }
-        return;
-      }
-      if (msg.type === 'drainBatchError') {
-        logInfo('webviewDrain', 'batch error', { error: msg.error });
-        drainingRef.current = false;
-        return;
-      }
-      if (msg.type === 'authToken' && typeof msg.token === 'string') {
-        await setToken(host, msg.token);
-        logInfo('outbox', 'token saved for host', { host });
-        return;
-      }
-      if (msg.type === 'themeProbe' && msg.payload) {
-        try {
-          logInfo('theme', 'probe', msg.payload);
-        } catch {}
-        return;
-      }
-      if (msg.type === 'syncDone') {
-        try {
-          await AsyncStorage.setItem(`sync:done:${host}`, String(Date.now()));
-          logInfo('sync', 'done flag set (webview-assisted)', { host, conversations: msg.conversations, messages: msg.messages });
-        } catch {}
-        syncingRef.current = false;
-        return;
-      }
-      if (msg.type === 'queueMessage' && msg.chatId && msg.body) {
-        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
-        const c = await count(host);
-        logInfo('outbox', 'enqueued', { chatId: msg.chatId, bodyKeys: Object.keys(msg.body || {}), count: c });
-        try {
-          try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); } catch {}
-          Toast.show({ type: 'info', text1: 'Message queued' });
-        } catch {}
-        try { onQueueCountChange && onQueueCountChange(c); } catch {}
-        return;
-      }
-      if (msg.type === 'externalLink' && typeof msg.url === 'string') {
-        await WebBrowser.openBrowserAsync(msg.url);
-        return;
-      }
-      if (msg.type === 'cacheResponse') {
-        const entry: CachedEntry = {
-          url: msg.url,
-          capturedAt: Date.now(),
-          data: msg.data,
-        };
-        await cacheApiResponse(host, entry);
-        return;
-      }
-      if (msg.type === 'downloadBlob' && msg.base64) {
-        const filename = msg.filename || 'download';
-        const uri = FileSystem.documentDirectory + `downloads/` + filename;
-        await FileSystem.makeDirectoryAsync(FileSystem.documentDirectory + 'downloads', { intermediates: true }).catch(() => {});
-        await FileSystem.writeAsStringAsync(uri, msg.base64, { encoding: FileSystem.EncodingType.Base64 });
-        if (Platform.OS === 'ios') {
-          await Sharing.shareAsync(uri, { mimeType: msg.mime, dialogTitle: filename });
-        } else {
-          Alert.alert('Downloaded', filename);
-        }
-        return;
-      }
-    } catch (err) {
+  const onMessage = useCallback(
+    async (e: WebViewMessageEvent) => {
       try {
-        logDebug('webview', 'onMessageError', { error: String(err) });
-        logDebug('webview', 'raw', String(e?.nativeEvent?.data || ''));
-      } catch {}
-    }
-  }, [baseUrl, injectWebDrainBatch, injectWebSync, onQueueCountChange]);
+        const msg = JSON.parse(e.nativeEvent.data || "{}");
+        const host = safeGetHost(baseUrl);
+        if (!host) return;
+        if (msg.type === "debug") {
+          logDebug("webview", "debug", msg);
+          try {
+            if ((msg.event === "injected" || msg.event === "hasInjected") && !syncingRef.current) {
+              const tok = await getToken(host);
+              const settings = await getSettings(host);
+              if (!tok && settings.fullSyncOnLoad) {
+                await injectWebSync();
+              } else if (!settings.fullSyncOnLoad) {
+                logInfo("sync", "fullSyncOnLoad disabled, skip webview-assisted sync");
+              }
+            }
+          } catch {}
+          return;
+        }
+        if (msg.type === "swStatus") {
+          logInfo("webview", "swStatus", msg);
+          try {
+            const key = `swhint:${host}`;
+            const pendingKey = `${key}:pending`;
+            const shownCount = parseInt((await AsyncStorage.getItem(key)) || "0");
+
+            // If this is an "unsupported" detection (early timing issue), delay the warning
+            if (msg.method === "unsupported") {
+              const existingPending = await AsyncStorage.getItem(pendingKey);
+              if (!existingPending) {
+                await AsyncStorage.setItem(pendingKey, String(Date.now()));
+                logInfo("webview", "swUnsupportedPending", { host, delayingWarning: true });
+
+                // Wait 3 seconds, then check if we got a better detection
+                setTimeout(async () => {
+                  try {
+                    const stillPending = await AsyncStorage.getItem(pendingKey);
+                    if (stillPending) {
+                      // No better detection came in, show the warning
+                      await AsyncStorage.removeItem(pendingKey);
+                      const currentCount = parseInt((await AsyncStorage.getItem(key)) || "0");
+                      if (currentCount < 2) {
+                        await AsyncStorage.setItem(key, String(currentCount + 1));
+                        Toast.show({
+                          type: "info",
+                          text1: "Service Worker not supported",
+                          text2: "Your browser may not support Service Workers. Tap to learn more.",
+                          onPress: async () => {
+                            try {
+                              await WebBrowser.openBrowserAsync(
+                                "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
+                              );
+                            } catch {}
+                          },
+                        });
+                        logInfo("webview", "swDelayedWarningShown", {
+                          host,
+                          method: "unsupported",
+                          shownCount: currentCount + 1,
+                        });
+                      }
+                    }
+                  } catch {}
+                }, SW_DETECTION_DELAY);
+              }
+              return;
+            }
+
+            // Clear any pending unsupported warning since we got a real detection
+            await AsyncStorage.removeItem(pendingKey);
+
+            // Only show toast if:
+            // 1. SW file doesn't exist OR SW exists but isn't functional
+            // 2. Haven't shown this warning more than 2 times for this host
+            // 3. Give preference to functional check over file existence
+            const shouldWarn =
+              (!msg.hasSW || (msg.hasSW && msg.swFunctional === false)) && shownCount < 2;
+
+            if (shouldWarn) {
+              await AsyncStorage.setItem(key, String(shownCount + 1));
+              const warningText = !msg.hasSW
+                ? "Service Worker not found on server"
+                : "Service Worker found but not working properly";
+
+              Toast.show({
+                type: "info",
+                text1: "Offline mode not fully enabled",
+                text2: `${warningText}. Tap to learn more.`,
+                onPress: async () => {
+                  try {
+                    await WebBrowser.openBrowserAsync(
+                      "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
+                    );
+                  } catch {}
+                },
+              });
+
+              logInfo("webview", "swWarningShown", {
+                host,
+                hasSW: msg.hasSW,
+                swFunctional: msg.swFunctional,
+                method: msg.method,
+                shownCount: shownCount + 1,
+              });
+            } else if (msg.hasSW && msg.swFunctional !== false) {
+              // SW appears to be working, clear any previous warning count
+              await AsyncStorage.removeItem(key);
+              logInfo("webview", "swWorking", { host, method: msg.method });
+            }
+          } catch {}
+          return;
+        }
+        if (msg.type === "drainBatchResult" && Array.isArray(msg.successIds)) {
+          await removeOutboxItems(host, msg.successIds);
+          const remaining = await count(host);
+          const token = await getToken(host);
+          logInfo("webviewDrain", "batch result", { removed: msg.successIds.length, remaining });
+          try {
+            if (msg.successIds.length > 0) {
+              try {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+              } catch {}
+              Toast.show({ type: "success", text1: `Sent ${msg.successIds.length} queued` });
+            }
+          } catch {}
+          try {
+            onQueueCountChange && onQueueCountChange(remaining);
+          } catch {}
+          if (!token && remaining > 0) {
+            await injectWebDrainBatch();
+          } else {
+            drainingRef.current = false;
+          }
+          return;
+        }
+        if (msg.type === "drainBatchError") {
+          logInfo("webviewDrain", "batch error", { error: msg.error });
+          drainingRef.current = false;
+          return;
+        }
+        if (msg.type === "authToken" && typeof msg.token === "string") {
+          await setToken(host, msg.token);
+          logInfo("outbox", "token saved for host", { host });
+          return;
+        }
+        if (msg.type === "themeProbe" && msg.payload) {
+          try {
+            logInfo("theme", "probe", msg.payload);
+          } catch {}
+          return;
+        }
+        if (msg.type === "syncDone") {
+          try {
+            await AsyncStorage.setItem(STORAGE_KEYS.syncDone(host), String(Date.now()));
+            logInfo("sync", "done flag set (webview-assisted)", {
+              host,
+              conversations: msg.conversations,
+              messages: msg.messages,
+            });
+          } catch {}
+          syncingRef.current = false;
+          return;
+        }
+        if (msg.type === "queueMessage" && msg.chatId && msg.body) {
+          const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
+          const c = await count(host);
+          logInfo("outbox", "enqueued", {
+            chatId: msg.chatId,
+            bodyKeys: Object.keys(msg.body || {}),
+            count: c,
+          });
+          try {
+            try {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+            } catch {}
+            Toast.show({ type: "info", text1: "Message queued" });
+          } catch {}
+          try {
+            onQueueCountChange && onQueueCountChange(c);
+          } catch {}
+          return;
+        }
+        if (msg.type === "externalLink" && typeof msg.url === "string") {
+          await WebBrowser.openBrowserAsync(msg.url);
+          return;
+        }
+        if (msg.type === "cacheResponse") {
+          const entry: CachedEntry = {
+            url: msg.url,
+            capturedAt: Date.now(),
+            data: msg.data,
+          };
+          await cacheApiResponse(host, entry);
+          return;
+        }
+        if (msg.type === "downloadBlob" && msg.base64) {
+          const filename = msg.filename || "download";
+          const uri = FileSystem.documentDirectory + `downloads/` + filename;
+          await FileSystem.makeDirectoryAsync(FileSystem.documentDirectory + "downloads", {
+            intermediates: true,
+          }).catch(() => {});
+          await FileSystem.writeAsStringAsync(uri, msg.base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          if (Platform.OS === "ios") {
+            await Sharing.shareAsync(uri, { mimeType: msg.mime, dialogTitle: filename });
+          } else {
+            Alert.alert("Downloaded", filename);
+          }
+          return;
+              }
+            } catch (err) {
+              try {
+                logDebug("webview", "onMessageError", { error: getErrorMessage(err) });
+                logDebug("webview", "raw", String(e?.nativeEvent?.data || ""));
+              } catch {}
+            }
+        
+    },
+    [baseUrl, injectWebDrainBatch, injectWebSync, onQueueCountChange]
+  );
 
   const injected = useMemo(() => buildInjection(baseUrl), [baseUrl]);
-  const themeBootstrap = useMemo(() => buildThemeBootstrap(colorScheme as 'dark' | 'light' | null), [colorScheme]);
+  const themeBootstrap = useMemo(
+    () => buildThemeBootstrap(colorScheme as "dark" | "light" | null),
+    [colorScheme]
+  );
   const beforeScripts = useMemo(() => `${themeBootstrap};${injected}`, [themeBootstrap, injected]);
 
   // Keep page aware of RN connectivity so DOM fallback can enqueue when RN says offline
   React.useEffect(() => {
     try {
-      const js = `(function(){try{ window.__owui_rnOnline = ${online ? 'true' : 'false'}; if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){ window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'rn',event:'online',online:${online ? 'true' : 'false'}})); } }catch(_){}})();`;
+      const js = `(function(){try{ window.__owui_rnOnline = ${online ? "true" : "false"}; if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){ window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'rn',event:'online',online:${online ? "true" : "false"}})); } }catch(_){}})();`;
       webref.current?.injectJavaScript(js);
     } catch {}
   }, [online]);
@@ -1072,10 +1144,10 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   // Apply device color scheme inside the WebView (helps when matchMedia doesn't reflect OS in RN WebView)
   React.useEffect(() => {
     try {
-      const dark = colorScheme === 'dark';
-      logInfo('theme', 'apply RN scheme', { scheme: colorScheme });
+      const dark = colorScheme === "dark";
+      logInfo("theme", "apply RN scheme", { scheme: colorScheme });
       const js = `(() => { try {
-        var isDark = ${colorScheme === 'dark' ? 'true' : 'false'};
+        var isDark = ${colorScheme === "dark" ? "true" : "false"};
         try { window.__owui_rnColorScheme = isDark ? 'dark' : 'light'; } catch(_){ }
         try {
           if (typeof window.__owui_notifyThemeChange === 'function') {
@@ -1100,7 +1172,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       injectThemeProbe();
       if (isAndroid) {
         // Note: react-native-webview supports forceDarkOn on Android; use it to encourage dark rendering where applicable
-        logInfo('theme', 'android forceDarkOn set', { forceDarkOn: !!dark });
+        logInfo("theme", "android forceDarkOn set", { forceDarkOn: !!dark });
       }
     } catch {}
   }, [colorScheme, injectThemeProbe, isAndroid]);
@@ -1114,7 +1186,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       const [c, token] = [await count(host), await getToken(host)];
       if (c > 0 && !token && !drainingRef.current) {
         drainingRef.current = true;
-        logInfo('webviewDrain', 'start (no native token)', { host, pending: c });
+        logInfo("webviewDrain", "start (no native token)", { host, pending: c });
         await injectWebDrainBatch();
       }
     })();
@@ -1123,7 +1195,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   // One-shot manual injection attempt as a fallback
   React.useEffect(() => {
     try {
-      logDebug('webview', 'manual inject attempt');
+      logDebug("webview", "manual inject attempt");
       webref.current?.injectJavaScript(`${injected};true;`);
       // Also perform a theme probe early
       injectThemeProbe();
@@ -1134,7 +1206,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   React.useEffect(() => {
     return () => {
       try {
-        logDebug('webview', 'unmount cleanup');
+        logDebug("webview", "unmount cleanup");
         webref.current?.injectJavaScript(`
           (function(){
             if (window.__owui_authPoll) {
@@ -1159,73 +1231,30 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       domStorageEnabled
       mediaPlaybackRequiresUserAction={false}
       allowsInlineMediaPlayback
-      {...(Platform.OS === 'android' && {
-        onPermissionRequest: async (request: any) => {
-          try {
-            const resources = request.nativeEvent.resources;
-            logDebug('webview', 'permission request', { resources });
-            
-            // Check if camera permission is requested
-            if (resources.includes('camera')) {
-              const { status } = await Camera.requestCameraPermissionsAsync();
-              logInfo('permissions', 'camera permission result', { status });
-              
-              if (status === 'granted') {
-                request.nativeEvent.grant();
-              } else {
-                request.nativeEvent.deny();
-                Toast.show({
-                  type: 'error',
-                  text1: 'Camera Permission Required',
-                  text2: 'Please enable camera access in Settings to use this feature.',
-                });
+      {...(Platform.OS === "android" && {
+              onPermissionRequest: async (request: WebViewPermissionRequest) => {
+                const { resources } = request;
+                logInfo("webview", "permission request", { resources });
+                request.grant(resources);
               }
-              return;
-            }
-            
-            // Check if microphone permission is requested
-            if (resources.includes('microphone')) {
-              const { status } = await Camera.requestMicrophonePermissionsAsync();
-              logInfo('permissions', 'microphone permission result', { status });
-              
-              if (status === 'granted') {
-                request.nativeEvent.grant();
-              } else {
-                request.nativeEvent.deny();
-                Toast.show({
-                  type: 'error',
-                  text1: 'Microphone Permission Required',
-                  text2: 'Please enable microphone access in Settings to use this feature.',
-                });
-              }
-              return;
-            }
-            
-            // For other permissions, deny by default
-            request.nativeEvent.deny();
-          } catch (error) {
-            logDebug('webview', 'permission request error', { error: String(error) });
-            request.nativeEvent.deny();
-          }
-        }
       })}
       // Encourage Android to respect dark theme at the rendering layer (in addition to page CSS)
-      forceDarkOn={isAndroid && colorScheme === 'dark'}
+      forceDarkOn={isAndroid && colorScheme === "dark"}
       onFileDownload={async (e) => {
         try {
           const url = e.nativeEvent.downloadUrl;
-          const filename = url.split('/').pop() || 'download';
-          const dir = FileSystem.documentDirectory + 'downloads/';
+          const filename = url.split("/").pop() || "download";
+          const dir = FileSystem.documentDirectory + "downloads/";
           await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
           const dest = dir + filename;
           const { uri } = await FileSystem.downloadAsync(url, dest);
-          if (Platform.OS === 'ios') {
+          if (Platform.OS === "ios") {
             await Sharing.shareAsync(uri);
           } else {
-            Alert.alert('Downloaded', filename);
+            Alert.alert("Downloaded", filename);
           }
         } catch {
-          Alert.alert('Download failed', 'Unable to download file.');
+          Alert.alert("Download failed", "Unable to download file.");
         }
       }}
       onMessage={onMessage}
@@ -1238,7 +1267,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
             WebBrowser.openBrowserAsync(req.url);
             return false;
           }
-          logDebug('webview', 'allow navigation', current.toString());
+          logDebug("webview", "allow navigation", current.toString());
           return true;
         } catch {
           return true;
@@ -1248,18 +1277,22 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       injectedJavaScript={injected}
       onLoadEnd={() => {
         try {
-          logDebug('webview', 'onLoadEnd reinject');
+          logDebug("webview", "onLoadEnd reinject");
           // Attempt plain reinject
           webref.current?.injectJavaScript(`${injected};true;`);
           // Probe the bridge explicitly
-          webref.current?.injectJavaScript(`(function(){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage('{"type":"debug","scope":"probe","event":"ping"}')}catch(e){}})();`);
+          webref.current?.injectJavaScript(
+            `(function(){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage('{"type":"debug","scope":"probe","event":"ping"}')}catch(e){}})();`
+          );
           // Safe-eval wrapper to catch syntax/runtime errors of the injected bundle
           const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
           webref.current?.injectJavaScript(WRAP);
           // Report whether our guard flag is set in page context
-          webref.current?.injectJavaScript(`(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`);
+          webref.current?.injectJavaScript(
+            `(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`
+          );
           // Re-assert theme via bootstrap notify if available
-          const APPLY = `(function(){try{var isDark=${colorScheme === 'dark' ? 'true' : 'false'}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
+          const APPLY = `(function(){try{var isDark=${colorScheme === "dark" ? "true" : "false"}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
           webref.current?.injectJavaScript(APPLY);
           // Probe current theme state after load
           injectThemeProbe();
@@ -1267,13 +1300,15 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       }}
       onNavigationStateChange={(navState) => {
         try {
-          logDebug('webview', 'nav change', navState.url);
+          logDebug("webview", "nav change", navState.url);
           webref.current?.injectJavaScript(`${injected};true;`);
           const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
           webref.current?.injectJavaScript(WRAP);
-          webref.current?.injectJavaScript(`(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`);
+          webref.current?.injectJavaScript(
+            `(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`
+          );
           // Re-assert theme on navigation changes
-          const APPLY = `(function(){try{var isDark=${colorScheme === 'dark' ? 'true' : 'false'}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
+          const APPLY = `(function(){try{var isDark=${colorScheme === "dark" ? "true" : "false"}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
           webref.current?.injectJavaScript(APPLY);
           // Re-probe theme on each navigation to capture changes from the app
           injectThemeProbe();
@@ -1281,7 +1316,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       }}
       onError={(syntheticEvent) => {
         try {
-          logInfo('webview', 'error', syntheticEvent.nativeEvent);
+          logInfo("webview", "error", syntheticEvent.nativeEvent);
         } catch {}
       }}
       allowsBackForwardNavigationGestures

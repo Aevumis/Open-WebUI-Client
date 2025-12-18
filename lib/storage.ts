@@ -14,6 +14,6 @@ export async function getJSON<T>(key: string): Promise<T | null> {
     return null;
   }
 }
-export async function setJSON(key: string, value: any) {
+export async function setJSON(key: string, value: unknown) {
   await AsyncStorage.setItem(key, JSON.stringify(value));
 }

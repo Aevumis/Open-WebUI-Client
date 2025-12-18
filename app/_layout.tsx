@@ -7,10 +7,11 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 export default function RootLayout() {
   // Global logger config: adjust here to control verbosity and scopes
   setLogConfig({
-    level: typeof __DEV__ !== 'undefined' && __DEV__ ? 'debug' : 'info',
-    scopes: (typeof __DEV__ !== 'undefined' && __DEV__)
-      ? ['webview', 'injection', 'sync', 'outbox', 'permissions']
-      : ['webview', 'injection', 'permissions'],
+    level: typeof __DEV__ !== "undefined" && __DEV__ ? "debug" : "info",
+    scopes:
+      typeof __DEV__ !== "undefined" && __DEV__
+        ? ["webview", "injection", "sync", "outbox", "permissions"]
+        : ["webview", "injection", "permissions"],
   });
   return (
     <SafeAreaProvider>

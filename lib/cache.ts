@@ -5,7 +5,7 @@ import { safeParseUrl } from "./url-utils";
 export type CachedEntry = {
   url: string;
   capturedAt: number;
-  data: any; // JSON from API
+  data: unknown; // JSON from API
   title?: string;
 };
 
@@ -36,7 +36,7 @@ async function readJSON<T>(path: string): Promise<T | null> {
   }
 }
 
-async function writeJSON(path: string, value: any) {
+async function writeJSON(path: string, value: unknown) {
   await FileSystem.writeAsStringAsync(path, JSON.stringify(value));
 }
 
@@ -47,29 +47,46 @@ function entryPath(host: string, id: string) {
 function parseIdFromUrl(url: string) {
   const u = safeParseUrl(url);
   if (u) {
-    const parts = u.pathname.split('/').filter(Boolean);
-    const idx = parts.findIndex(p => /(conversation|conversations|chat|thread|messages)/i.test(p));
+    const parts = u.pathname.split("/").filter(Boolean);
+    const idx = parts.findIndex((p) =>
+      /(conversation|conversations|chat|thread|messages)/i.test(p)
+    );
     if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
   }
   return String(Math.random()).slice(2);
 }
 
+/**
+ * Caches an API response to the local file system and updates the LRU index.
+ * @param host - The server host the data belongs to
+ * @param entry - The data to cache
+ */
 export async function cacheApiResponse(host: string, entry: CachedEntry) {
   const id = parseIdFromUrl(entry.url);
   const path = entryPath(host, id);
-  const dir = path.slice(0, path.lastIndexOf('/'));
+  const dir = path.slice(0, path.lastIndexOf("/"));
   await ensureDir(dir);
   await writeJSON(path, entry);
   await touchIndex(host, id, entry.title);
   await enforceLimit();
 }
 
+/**
+ * Reads a cached API response from the file system.
+ * @param host - The server host
+ * @param id - The unique conversation/chat ID
+ * @returns The cached entry or null if not found
+ */
 export async function readCachedEntry(host: string, id: string): Promise<CachedEntry | null> {
   const path = entryPath(host, id);
   const data = await readJSON<CachedEntry>(path);
   return data;
 }
 
+/**
+ * Returns the full list of items in the cache index, sorted by most recent access.
+ * @returns Array of cache index items
+ */
 export async function getCacheIndex(): Promise<CacheIndexItem[]> {
   const idx = (await readJSON<Record<string, CacheIndexItem>>(INDEX_PATH)) || {};
   return Object.values(idx).sort((a, b) => b.lastAccess - a.lastAccess);
@@ -114,7 +131,7 @@ async function touchIndex(host: string, id: string, title?: string) {
   const key = `${host}/${id}`;
   const idx = (await readJSON<Record<string, CacheIndexItem>>(INDEX_PATH)) || {};
   const stat = await FileSystem.getInfoAsync(entryPath(host, id));
-  const size = stat.exists ? stat.size ?? 0 : 0;
+  const size = stat.exists ? (stat.size ?? 0) : 0;
   idx[key] = {
     key,
     id,
