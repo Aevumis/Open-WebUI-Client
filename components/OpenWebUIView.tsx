@@ -1,19 +1,15 @@
 import React, { useCallback, useMemo, useRef } from "react";
 import { Alert, Platform, useColorScheme } from "react-native";
-import {
-  WebView,
-  WebViewMessageEvent,
-  type WebViewPermissionRequest 
-} from "react-native-webview";
-import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getSettings } from "../lib/outbox";
-
+import { WebView, WebViewMessageEvent } from "react-native-webview";
 import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { Camera } from "expo-camera";
-import * as MediaLibrary from "expo-media-library";
-import { cacheApiResponse, type CachedEntry } from "../lib/cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Haptics from "expo-haptics";
+import Toast from "react-native-toast-message";
+
+import { cacheApiResponse, type CachedEntry } from "../lib/cache";
 import {
   enqueue,
   setToken,
@@ -24,8 +20,6 @@ import {
   getSettings,
 } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
-import Toast from "react-native-toast-message";
-import * as Haptics from "expo-haptics";
 import {
   WEBVIEW_LOAD_TIMEOUT,
   AUTH_POLLING_INTERVAL,
@@ -33,21 +27,16 @@ import {
   SW_READY_WAIT,
   SW_DETECTION_DELAY,
   WEBVIEW_DRAIN_TIMEOUT,
-  WEBVIEW_DRAIN_CHECK_INTERVAL
+  WEBVIEW_DRAIN_CHECK_INTERVAL,
 } from "../lib/constants";
 import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getErrorMessage } from "../lib/error-utils";
 
-// WebView debug logs are now gated via centralized logger scopes/levels
+type WebViewPermissionRequest = any; // Fallback to any for now to continue fixing other strict errors
 
-
-function buildInjection(baseUrl: string) {
-  // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
-  // Post messages to React Native with type keys for native handling.
-  const h = safeGetHost(baseUrl);
-  const allowedHost = JSON.stringify(h || "");
-  return `(() => {
+function buildInjectionBoilerplate(allowedHost: string) {
+  return `
     try {
       if (window.__owui_injected) {
         try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'debug', scope: 'injection', event: 'alreadyInjected' })); } catch (_) {}
@@ -97,7 +86,11 @@ function buildInjection(baseUrl: string) {
         return false;
       }
     }
+  `;
+}
 
+function buildInjectionErrorHooks() {
+  return `
     // Early boot marker and error hooks
     try { post({ type: 'debug', scope: 'injection', event: 'boot' }); } catch {}
     try {
@@ -120,6 +113,12 @@ function buildInjection(baseUrl: string) {
       // Browser network state visibility
       window.addEventListener('online', function(){ try { window.__owui_wasOffline = false; post({ type: 'debug', scope: 'injection', event: 'browserNetwork', online: true }); } catch {} });
       window.addEventListener('offline', function(){ try { window.__owui_wasOffline = true; post({ type: 'debug', scope: 'injection', event: 'browserNetwork', online: false }); } catch {} });
+    } catch (_) {}
+  `;
+}
+
+function buildInjectionDomInterception() {
+  return `
       // User interaction hints while offline test
       document.addEventListener('keydown', function(e){
         try {
@@ -218,7 +217,7 @@ function buildInjection(baseUrl: string) {
           }
           try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
           return;
-        } catch {}
+        } catch {} 
       }, true);
       document.addEventListener('click', function(e){
         try {
@@ -273,16 +272,18 @@ function buildInjection(baseUrl: string) {
               if (!offline) return;
               if ((window.__owui_lastCompletionTick||0) > startTick) return;
               var text = sanitizeText(String(window.__owui_lastTextCandidate||'').trim());
-              if (text && cid && validateChatId(cid)) {
-                post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
-                post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
-              }
-            } catch {}
-          }, ${WEBVIEW_LOAD_TIMEOUT});
-        } catch {}
-      }, true);
-    } catch {}
-
+                                if (text && cid && validateChatId(cid)) {
+                                  post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
+                                  post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
+                                }
+                              } catch {}
+                            }, ${WEBVIEW_LOAD_TIMEOUT});
+                      } catch {}
+                    }, true);
+                `;
+}
+function buildInjectionAuthCapture() {
+  return `
     function getCookie(name) {
       try {
         const m = (document.cookie || '').match(new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()\[\]\\\/\+^])/g, '\\$1') + '=([^;]*)'));
@@ -319,14 +320,44 @@ function buildInjection(baseUrl: string) {
           }
         } catch (_) {}
       }
-      if (t) { 
-        sentAuth = true; 
-        post({ type: 'authToken', token: t }); 
-        post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' }); 
+      if (t) {
+        sentAuth = true;
+        post({ type: 'authToken', token: t });
+        post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' });
         if (window.__owui_authPoll) { clearInterval(window.__owui_authPoll); window.__owui_authPoll = null; }
       }
     }
 
+        checkAuthOnce();
+
+        if (!sentAuth) {
+
+          window.__owui_authPoll = setInterval(checkAuthOnce, ${AUTH_POLLING_INTERVAL});
+
+          // Prevent infinite polling
+
+          setTimeout(() => {
+
+            if (window.__owui_authPoll) {
+
+              clearInterval(window.__owui_authPoll);
+
+              window.__owui_authPoll = null;
+
+              post({ type: 'debug', scope: 'injection', event: 'authPollingTimeout' });
+
+            }
+
+          }, ${AUTH_CAPTURE_TIMEOUT});
+
+        }
+
+    
+  `;
+}
+
+function buildInjectionServiceWorker() {
+  return `
     // Register Service Worker for offline shell + API cache (served at origin /sw.js)
     if ('serviceWorker' in navigator) {
       try { navigator.serviceWorker.register('/sw.js', { scope: '/' }); } catch (e) {}
@@ -339,15 +370,15 @@ function buildInjection(baseUrl: string) {
             post({ type: 'debug', scope: 'injection', event: 'swDetectionSkipped', reason: 'pageNotReady', host: window.location.host });
             return;
           }
-          
+
           post({ type: 'debug', scope: 'injection', event: 'swDetectionStart', host: window.location.host });
-          
+
           let hasSW = false;
           let method = 'regCheck';
           let status = null;
           let swFunctional = false;
           let error = null;
-          
+
           try {
             // First check if SW file exists
             method = 'head';
@@ -355,7 +386,7 @@ function buildInjection(baseUrl: string) {
             status = res && res.status;
             hasSW = !!(res && res.ok);
             post({ type: 'debug', scope: 'injection', event: 'swFileCheck', method: 'head', status, hasSW });
-            
+
             if (!hasSW && (!res || status === 405 || status === 501)) {
               method = 'get';
               const res2 = await fetch('/sw.js', { method: 'GET', cache: 'no-store' });
@@ -367,7 +398,7 @@ function buildInjection(baseUrl: string) {
             error = String(e && e.message || e);
             post({ type: 'debug', scope: 'injection', event: 'swFileCheckError', error });
           }
-          
+
           // Check registration status
           if (!hasSW) {
             try {
@@ -380,14 +411,14 @@ function buildInjection(baseUrl: string) {
               post({ type: 'debug', scope: 'injection', event: 'swRegistrationError', error: String(e && e.message || e) });
             }
           }
-          
+
           // Test if SW is actually functional (only if we think it exists)
           if (hasSW) {
             try {
               // Wait a bit for SW to be ready, then test functionality
               await new Promise(r => setTimeout(r, ${SW_READY_WAIT}));
-              const testRes = await fetch('/sw.js', { 
-                method: 'GET', 
+              const testRes = await fetch('/sw.js', {
+                method: 'GET',
                 cache: 'no-store',
                 headers: { 'x-sw-test': 'functional-check' }
               });
@@ -398,7 +429,7 @@ function buildInjection(baseUrl: string) {
               post({ type: 'debug', scope: 'injection', event: 'swFunctionalError', error: String(e && e.message || e) });
             }
           }
-          
+
           post({ type: 'debug', scope: 'injection', event: 'swDetectionComplete', hasSW, swFunctional, method, status, error });
           try { post({ type: 'swStatus', hasSW, swFunctional, method, status, error }); } catch(_){}
         } catch (e) {
@@ -407,12 +438,16 @@ function buildInjection(baseUrl: string) {
       })();
     }
     else {
-      try { 
+      try {
         post({ type: 'debug', scope: 'injection', event: 'swUnsupported' });
-        post({ type: 'swStatus', hasSW: false, method: 'unsupported' }); 
+        post({ type: 'swStatus', hasSW: false, method: 'unsupported' });
       } catch(_){}
     }
+  `;
+}
 
+function buildInjectionFetchInterception() {
+  return `
     function shouldCache(url) {
       try {
         const u = new URL(url);
@@ -433,24 +468,6 @@ function buildInjection(baseUrl: string) {
       });
     }
 
-    checkAuthOnce();
-    if (!sentAuth) {
-      window.__owui_authPoll = setInterval(checkAuthOnce, ${AUTH_POLLING_INTERVAL});
-      // Prevent infinite polling
-      setTimeout(() => {
-        if (window.__owui_authPoll) {
-          clearInterval(window.__owui_authPoll);
-          window.__owui_authPoll = null;
-          post({ type: 'debug', scope: 'injection', event: 'authPollingTimeout' });
-        }
-      }, ${AUTH_CAPTURE_TIMEOUT});
-    }
-    
-    try { post({ type: 'debug', scope: 'injection', event: 'injected' }); } catch {}
-
-    // ... existing injection code ...
-
-
     // Capture Authorization from XMLHttpRequest as well (e.g., axios)
     try {
       const XHR = window.XMLHttpRequest;
@@ -459,7 +476,7 @@ function buildInjection(baseUrl: string) {
         XHR.prototype.setRequestHeader = function(name, value) {
           try {
             if (!sentAuth && /authorization/i.test(String(name))) {
-              const m = String(value).match(/Bearer\s+(.+)/i);
+              const m = String(value).match(/Bearer\\s+(.+)/i);
               if (m && m[1]) { sentAuth = true; post({ type: 'authToken', token: m[1] }); post({ type: 'debug', scope: 'injection', event: 'authXHRHeaderCaptured' }); }
             }
           } catch {}
@@ -489,7 +506,7 @@ function buildInjection(baseUrl: string) {
         const hh = new Headers((init && init.headers) || {});
         const ah = hh.get('authorization') || hh.get('Authorization');
         if (ah && !sentAuth) {
-          const m = ah.match(/Bearer\s+(.+)/i);
+          const m = ah.match(/Bearer\\s+(.+)/i);
           if (m && m[1]) { sentAuth = true; post({ type: 'authToken', token: m[1] }); post({ type: 'debug', scope: 'injection', event: 'authHeaderCaptured' }); }
         } else if (!sentAuth) {
           checkAuthOnce();
@@ -576,15 +593,19 @@ function buildInjection(baseUrl: string) {
             const clone = res.clone();
             const blob = await clone.blob();
             const b64 = await readBlobAsBase64(blob);
-            const nameMatch = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disp);
+            const nameMatch = /filename\\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disp);
             const filename = decodeURIComponent(nameMatch?.[1] || nameMatch?.[2] || 'download');
             post({ type: 'downloadBlob', filename, mime: ct, base64: b64 });
           }
         }
       } catch (e) {}
       return res;
-    }
+    };
+  `;
+}
 
+function buildInjectionExternalLinks() {
+  return `
     const origOpen = window.open;
     window.open = function(url, target, features) {
       try { post({ type: 'externalLink', url }); } catch {}
@@ -604,7 +625,22 @@ function buildInjection(baseUrl: string) {
         }
       } catch {}
     }, true);
+  `;
+}
 
+function buildInjection(baseUrl: string) {
+  // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
+  // Post messages to React Native with type keys for native handling.
+  const h = safeGetHost(baseUrl);
+  const allowedHost = JSON.stringify(h || "");
+  return `(() => {
+    ${buildInjectionBoilerplate(allowedHost)}
+    ${buildInjectionErrorHooks()}
+    ${buildInjectionDomInterception()}
+    ${buildInjectionAuthCapture()}
+    ${buildInjectionServiceWorker()}
+    ${buildInjectionFetchInterception()}
+    ${buildInjectionExternalLinks()}
   })();`;
 }
 
@@ -666,6 +702,243 @@ function buildThemeBootstrap(scheme: "dark" | "light" | null) {
     } catch(_){ }
     try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'injection', event:'themeBootstrap' })); } catch(_){ }
   } catch(_){ } })();`;
+}
+
+function handleDebug(msg: any) {
+  logDebug("webview", "debug", msg);
+}
+
+async function handleAuthToken(msg: any, host: string) {
+  if (typeof msg.token === "string") {
+    await setToken(host, msg.token);
+
+    logInfo("outbox", "token saved for host", { host });
+  }
+}
+
+async function handleSyncDone(msg: any, host: string, syncingRef: React.MutableRefObject<boolean>) {
+  try {
+    await AsyncStorage.setItem(STORAGE_KEYS.syncDone(host), String(Date.now()));
+
+    logInfo("sync", "done flag set (webview-assisted)", {
+      host,
+
+      conversations: msg.conversations,
+
+      messages: msg.messages,
+    });
+  } catch {}
+
+  syncingRef.current = false;
+}
+
+async function handleQueueMessage(
+  msg: any,
+
+  host: string,
+
+  onQueueCountChange?: (count: number) => void
+) {
+  if (msg.chatId && msg.body) {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
+
+    const c = await count(host);
+
+    logInfo("outbox", "enqueued", {
+      chatId: msg.chatId,
+
+      bodyKeys: Object.keys(msg.body || {}),
+
+      count: c,
+    });
+
+    try {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      } catch {}
+
+      Toast.show({ type: "info", text1: "Message queued" });
+    } catch {}
+
+    try {
+      onQueueCountChange && onQueueCountChange(c);
+    } catch {}
+  }
+}
+
+async function handleDownloadBlob(msg: any) {
+  if (msg.base64) {
+    const filename = msg.filename || "download";
+
+    const uri = FileSystem.documentDirectory + `downloads/` + filename;
+
+    await FileSystem.makeDirectoryAsync(FileSystem.documentDirectory + "downloads", {
+      intermediates: true,
+    }).catch(() => {});
+
+    await FileSystem.writeAsStringAsync(uri, msg.base64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    if (Platform.OS === "ios") {
+      await Sharing.shareAsync(uri, { mimeType: msg.mime, dialogTitle: filename });
+    } else {
+      Alert.alert("Downloaded", filename);
+    }
+  }
+}
+
+async function handleSwStatus(msg: any, host: string) {
+  logInfo("webview", "swStatus", msg);
+  try {
+    const key = `swhint:${host}`;
+    const pendingKey = `${key}:pending`;
+    const shownCount = parseInt((await AsyncStorage.getItem(key)) || "0");
+
+    // If this is an "unsupported" detection (early timing issue), delay the warning
+    if (msg.method === "unsupported") {
+      const existingPending = await AsyncStorage.getItem(pendingKey);
+      if (!existingPending) {
+        await AsyncStorage.setItem(pendingKey, String(Date.now()));
+        logInfo("webview", "swUnsupportedPending", { host, delayingWarning: true });
+
+        // Wait 3 seconds, then check if we got a better detection
+        setTimeout(async () => {
+          try {
+            const stillPending = await AsyncStorage.getItem(pendingKey);
+            if (stillPending) {
+              // No better detection came in, show the warning
+              await AsyncStorage.removeItem(pendingKey);
+              const currentCount = parseInt((await AsyncStorage.getItem(key)) || "0");
+              if (currentCount < 2) {
+                await AsyncStorage.setItem(key, String(currentCount + 1));
+                Toast.show({
+                  type: "info",
+                  text1: "Service Worker not supported",
+                  text2: "Your browser may not support Service Workers. Tap to learn more.",
+                  onPress: async () => {
+                    try {
+                      await WebBrowser.openBrowserAsync(
+                        "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
+                      );
+                    } catch {}
+                  },
+                });
+                logInfo("webview", "swDelayedWarningShown", {
+                  host,
+                  method: "unsupported",
+                  shownCount: currentCount + 1,
+                });
+              }
+            }
+          } catch {}
+        }, SW_DETECTION_DELAY);
+      }
+      return;
+    }
+
+    // Clear any pending unsupported warning since we got a real detection
+    await AsyncStorage.removeItem(pendingKey);
+
+    // Only show toast if:
+    // 1. SW file doesn't exist OR SW exists but isn't functional
+    // 2. Haven't shown this warning more than 2 times for this host
+    // 3. Give preference to functional check over file existence
+    const shouldWarn = (!msg.hasSW || (msg.hasSW && msg.swFunctional === false)) && shownCount < 2;
+
+    if (shouldWarn) {
+      await AsyncStorage.setItem(key, String(shownCount + 1));
+      const warningText = !msg.hasSW
+        ? "Service Worker not found on server"
+        : "Service Worker found but not working properly";
+
+      Toast.show({
+        type: "info",
+        text1: "Offline mode not fully enabled",
+        text2: `${warningText}. Tap to learn more.`,
+        onPress: async () => {
+          try {
+            await WebBrowser.openBrowserAsync(
+              "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
+            );
+          } catch {}
+        },
+      });
+
+      logInfo("webview", "swWarningShown", {
+        host,
+        hasSW: msg.hasSW,
+        swFunctional: msg.swFunctional,
+        method: msg.method,
+        shownCount: shownCount + 1,
+      });
+    } else if (msg.hasSW && msg.swFunctional !== false) {
+      // SW appears to be working, clear any previous warning count
+      await AsyncStorage.removeItem(key);
+      logInfo("webview", "swWorking", { host, method: msg.method });
+    }
+  } catch {}
+}
+
+async function handleDrainBatchResult(
+  msg: any,
+  host: string,
+  drainingRef: React.MutableRefObject<boolean>,
+  onQueueCountChange?: (count: number) => void,
+  injectWebDrainBatch?: () => Promise<void>
+) {
+  if (Array.isArray(msg.successIds)) {
+    await removeOutboxItems(host, msg.successIds);
+    const remaining = await count(host);
+    const token = await getToken(host);
+    logInfo("webviewDrain", "batch result", { removed: msg.successIds.length, remaining });
+    try {
+      if (msg.successIds.length > 0) {
+        try {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+        } catch {}
+        Toast.show({ type: "success", text1: `Sent ${msg.successIds.length} queued` });
+      }
+    } catch {}
+    try {
+      onQueueCountChange && onQueueCountChange(remaining);
+    } catch {}
+    if (!token && remaining > 0 && injectWebDrainBatch) {
+      await injectWebDrainBatch();
+    } else {
+      drainingRef.current = false;
+    }
+  }
+}
+
+function handleDrainBatchError(msg: any, drainingRef: React.MutableRefObject<boolean>) {
+  logInfo("webviewDrain", "batch error", { error: msg.error });
+  drainingRef.current = false;
+}
+
+function handleThemeProbe(msg: any) {
+  if (msg.payload) {
+    try {
+      logInfo("theme", "probe", msg.payload);
+    } catch {}
+  }
+}
+
+async function handleExternalLink(msg: any) {
+  if (typeof msg.url === "string") {
+    await WebBrowser.openBrowserAsync(msg.url);
+  }
+}
+
+async function handleCacheResponse(msg: any, host: string) {
+  const entry: CachedEntry = {
+    url: msg.url,
+    capturedAt: Date.now(),
+    data: msg.data,
+  };
+  await cacheApiResponse(host, entry);
 }
 
 export default function OpenWebUIView({
@@ -827,7 +1100,7 @@ export default function OpenWebUIView({
           if (window.__owui_syncing) { post({ type: 'debug', scope: 'injection', event: 'syncSkipAlreadyRunning' }); return; }
           window.__owui_syncing = true;
           post({ type: 'debug', scope: 'injection', event: 'syncStart' });
-          const LIMIT = ${Number.isFinite(0) ? "" : ""}${limitConversations};
+          const LIMIT = ${limitConversations};
           const MIN = ${minInterval};
           let page = 1;
           const chats = [];
@@ -884,9 +1157,10 @@ export default function OpenWebUIView({
         const msg = JSON.parse(e.nativeEvent.data || "{}");
         const host = safeGetHost(baseUrl);
         if (!host) return;
-        if (msg.type === "debug") {
-          logDebug("webview", "debug", msg);
-          try {
+
+        switch (msg.type) {
+          case "debug":
+            handleDebug(msg);
             if ((msg.event === "injected" || msg.event === "hasInjected") && !syncingRef.current) {
               const tok = await getToken(host);
               const settings = await getSettings(host);
@@ -896,209 +1170,50 @@ export default function OpenWebUIView({
                 logInfo("sync", "fullSyncOnLoad disabled, skip webview-assisted sync");
               }
             }
-          } catch {}
-          return;
-        }
-        if (msg.type === "swStatus") {
-          logInfo("webview", "swStatus", msg);
-          try {
-            const key = `swhint:${host}`;
-            const pendingKey = `${key}:pending`;
-            const shownCount = parseInt((await AsyncStorage.getItem(key)) || "0");
-
-            // If this is an "unsupported" detection (early timing issue), delay the warning
-            if (msg.method === "unsupported") {
-              const existingPending = await AsyncStorage.getItem(pendingKey);
-              if (!existingPending) {
-                await AsyncStorage.setItem(pendingKey, String(Date.now()));
-                logInfo("webview", "swUnsupportedPending", { host, delayingWarning: true });
-
-                // Wait 3 seconds, then check if we got a better detection
-                setTimeout(async () => {
-                  try {
-                    const stillPending = await AsyncStorage.getItem(pendingKey);
-                    if (stillPending) {
-                      // No better detection came in, show the warning
-                      await AsyncStorage.removeItem(pendingKey);
-                      const currentCount = parseInt((await AsyncStorage.getItem(key)) || "0");
-                      if (currentCount < 2) {
-                        await AsyncStorage.setItem(key, String(currentCount + 1));
-                        Toast.show({
-                          type: "info",
-                          text1: "Service Worker not supported",
-                          text2: "Your browser may not support Service Workers. Tap to learn more.",
-                          onPress: async () => {
-                            try {
-                              await WebBrowser.openBrowserAsync(
-                                "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
-                              );
-                            } catch {}
-                          },
-                        });
-                        logInfo("webview", "swDelayedWarningShown", {
-                          host,
-                          method: "unsupported",
-                          shownCount: currentCount + 1,
-                        });
-                      }
-                    }
-                  } catch {}
-                }, SW_DETECTION_DELAY);
-              }
-              return;
-            }
-
-            // Clear any pending unsupported warning since we got a real detection
-            await AsyncStorage.removeItem(pendingKey);
-
-            // Only show toast if:
-            // 1. SW file doesn't exist OR SW exists but isn't functional
-            // 2. Haven't shown this warning more than 2 times for this host
-            // 3. Give preference to functional check over file existence
-            const shouldWarn =
-              (!msg.hasSW || (msg.hasSW && msg.swFunctional === false)) && shownCount < 2;
-
-            if (shouldWarn) {
-              await AsyncStorage.setItem(key, String(shownCount + 1));
-              const warningText = !msg.hasSW
-                ? "Service Worker not found on server"
-                : "Service Worker found but not working properly";
-
-              Toast.show({
-                type: "info",
-                text1: "Offline mode not fully enabled",
-                text2: `${warningText}. Tap to learn more.`,
-                onPress: async () => {
-                  try {
-                    await WebBrowser.openBrowserAsync(
-                      "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
-                    );
-                  } catch {}
-                },
-              });
-
-              logInfo("webview", "swWarningShown", {
-                host,
-                hasSW: msg.hasSW,
-                swFunctional: msg.swFunctional,
-                method: msg.method,
-                shownCount: shownCount + 1,
-              });
-            } else if (msg.hasSW && msg.swFunctional !== false) {
-              // SW appears to be working, clear any previous warning count
-              await AsyncStorage.removeItem(key);
-              logInfo("webview", "swWorking", { host, method: msg.method });
-            }
-          } catch {}
-          return;
-        }
-        if (msg.type === "drainBatchResult" && Array.isArray(msg.successIds)) {
-          await removeOutboxItems(host, msg.successIds);
-          const remaining = await count(host);
-          const token = await getToken(host);
-          logInfo("webviewDrain", "batch result", { removed: msg.successIds.length, remaining });
-          try {
-            if (msg.successIds.length > 0) {
-              try {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-              } catch {}
-              Toast.show({ type: "success", text1: `Sent ${msg.successIds.length} queued` });
-            }
-          } catch {}
-          try {
-            onQueueCountChange && onQueueCountChange(remaining);
-          } catch {}
-          if (!token && remaining > 0) {
-            await injectWebDrainBatch();
-          } else {
-            drainingRef.current = false;
-          }
-          return;
-        }
-        if (msg.type === "drainBatchError") {
-          logInfo("webviewDrain", "batch error", { error: msg.error });
-          drainingRef.current = false;
-          return;
-        }
-        if (msg.type === "authToken" && typeof msg.token === "string") {
-          await setToken(host, msg.token);
-          logInfo("outbox", "token saved for host", { host });
-          return;
-        }
-        if (msg.type === "themeProbe" && msg.payload) {
-          try {
-            logInfo("theme", "probe", msg.payload);
-          } catch {}
-          return;
-        }
-        if (msg.type === "syncDone") {
-          try {
-            await AsyncStorage.setItem(STORAGE_KEYS.syncDone(host), String(Date.now()));
-            logInfo("sync", "done flag set (webview-assisted)", {
+            break;
+          case "swStatus":
+            await handleSwStatus(msg, host);
+            break;
+          case "drainBatchResult":
+            await handleDrainBatchResult(
+              msg,
               host,
-              conversations: msg.conversations,
-              messages: msg.messages,
-            });
-          } catch {}
-          syncingRef.current = false;
-          return;
+              drainingRef,
+              onQueueCountChange,
+              injectWebDrainBatch
+            );
+            break;
+          case "drainBatchError":
+            handleDrainBatchError(msg, drainingRef);
+            break;
+          case "authToken":
+            await handleAuthToken(msg, host);
+            break;
+          case "themeProbe":
+            handleThemeProbe(msg);
+            break;
+          case "syncDone":
+            await handleSyncDone(msg, host, syncingRef);
+            break;
+          case "queueMessage":
+            await handleQueueMessage(msg, host, onQueueCountChange);
+            break;
+          case "externalLink":
+            await handleExternalLink(msg);
+            break;
+          case "cacheResponse":
+            await handleCacheResponse(msg, host);
+            break;
+          case "downloadBlob":
+            await handleDownloadBlob(msg);
+            break;
         }
-        if (msg.type === "queueMessage" && msg.chatId && msg.body) {
-          const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
-          const c = await count(host);
-          logInfo("outbox", "enqueued", {
-            chatId: msg.chatId,
-            bodyKeys: Object.keys(msg.body || {}),
-            count: c,
-          });
-          try {
-            try {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-            } catch {}
-            Toast.show({ type: "info", text1: "Message queued" });
-          } catch {}
-          try {
-            onQueueCountChange && onQueueCountChange(c);
-          } catch {}
-          return;
-        }
-        if (msg.type === "externalLink" && typeof msg.url === "string") {
-          await WebBrowser.openBrowserAsync(msg.url);
-          return;
-        }
-        if (msg.type === "cacheResponse") {
-          const entry: CachedEntry = {
-            url: msg.url,
-            capturedAt: Date.now(),
-            data: msg.data,
-          };
-          await cacheApiResponse(host, entry);
-          return;
-        }
-        if (msg.type === "downloadBlob" && msg.base64) {
-          const filename = msg.filename || "download";
-          const uri = FileSystem.documentDirectory + `downloads/` + filename;
-          await FileSystem.makeDirectoryAsync(FileSystem.documentDirectory + "downloads", {
-            intermediates: true,
-          }).catch(() => {});
-          await FileSystem.writeAsStringAsync(uri, msg.base64, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          if (Platform.OS === "ios") {
-            await Sharing.shareAsync(uri, { mimeType: msg.mime, dialogTitle: filename });
-          } else {
-            Alert.alert("Downloaded", filename);
-          }
-          return;
-              }
-            } catch (err) {
-              try {
-                logDebug("webview", "onMessageError", { error: getErrorMessage(err) });
-                logDebug("webview", "raw", String(e?.nativeEvent?.data || ""));
-              } catch {}
-            }
-        
+      } catch (err) {
+        try {
+          logDebug("webview", "onMessageError", { error: getErrorMessage(err) });
+          logDebug("webview", "raw", String(e?.nativeEvent?.data || ""));
+        } catch {}
+      }
     },
     [baseUrl, injectWebDrainBatch, injectWebSync, onQueueCountChange]
   );
@@ -1203,18 +1318,29 @@ export default function OpenWebUIView({
   }, [injected, injectThemeProbe]);
 
   // Cleanup WebView intervals on unmount
+
   React.useEffect(() => {
+    const currentWebref = webref.current;
+
     return () => {
       try {
         logDebug("webview", "unmount cleanup");
-        webref.current?.injectJavaScript(`
-          (function(){
-            if (window.__owui_authPoll) {
-              clearInterval(window.__owui_authPoll);
-              window.__owui_authPoll = null;
-            }
-          })();
-        `);
+
+        currentWebref?.injectJavaScript(`
+
+            (function(){
+
+              if (window.__owui_authPoll) {
+
+                clearInterval(window.__owui_authPoll);
+
+                window.__owui_authPoll = null;
+
+              }
+
+            })();
+
+          `);
       } catch {}
     };
   }, []);
@@ -1232,11 +1358,11 @@ export default function OpenWebUIView({
       mediaPlaybackRequiresUserAction={false}
       allowsInlineMediaPlayback
       {...(Platform.OS === "android" && {
-              onPermissionRequest: async (request: WebViewPermissionRequest) => {
-                const { resources } = request;
-                logInfo("webview", "permission request", { resources });
-                request.grant(resources);
-              }
+        onPermissionRequest: async (request: WebViewPermissionRequest) => {
+          const { resources } = request;
+          logInfo("webview", "permission request", { resources });
+          request.grant(resources);
+        },
       })}
       // Encourage Android to respect dark theme at the rendering layer (in addition to page CSS)
       forceDarkOn={isAndroid && colorScheme === "dark"}

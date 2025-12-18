@@ -122,7 +122,9 @@ export default function OfflineConversationView() {
 
   const [loading, setLoading] = useState(true);
   const [title, setTitle] = useState<string>("");
-  const [messages, setMessages] = useState<{ id: string; role: string; content: string }[]>([]);
+  const [messages, setMessages] = useState<
+    { id: string; role: "user" | "assistant" | "system"; content: string }[]
+  >([]);
 
   useEffect(() => {
     (async () => {
@@ -143,18 +145,29 @@ export default function OfflineConversationView() {
         // Build path from root to currentId (ignoring branches)
         const path: string[] = [];
         const visited = new Set<string>();
-        while (curId && !visited.has(curId) && map[curId]) {
+        while (curId && !visited.has(curId)) {
+          const node: import("../../lib/types").MessageNode | undefined = map[curId];
+          if (!node) break;
           visited.add(curId);
           path.push(curId);
-          curId = map[curId].parentId;
+          curId = node.parentId;
         }
         path.reverse();
 
-        const ordered = path.map((mid) => ({
-          id: mid,
-          role: map[mid].role,
-          content: String(map[mid].content || ""),
-        }));
+        const ordered = path
+          .map((mid) => {
+            const node = map[mid];
+            if (!node) return null;
+            return {
+              id: mid,
+              role: node.role,
+              content: String(node.content || ""),
+            };
+          })
+          .filter(
+            (m): m is { id: string; role: "user" | "assistant" | "system"; content: string } =>
+              m !== null
+          );
         setMessages(ordered);
         debug("offline", "loaded offline conversation", { host, id, count: ordered.length });
       } catch (e) {

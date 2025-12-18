@@ -9,7 +9,6 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, router } from "expo-router";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 import OpenWebUIView from "../components/OpenWebUIView";
 import { maybeFullSync, isFullSyncDone } from "../lib/sync";
@@ -21,6 +20,8 @@ import * as Haptics from "expo-haptics";
 import { SYNC_INTERVAL } from "../lib/constants";
 import { safeGetHost } from "../lib/url-utils";
 import { STORAGE_KEYS } from "../lib/storage-keys";
+import { getStorageJSON } from "../lib/storage-utils";
+import { ServerItem } from "../lib/types";
 
 export default function ClientScreen() {
   const params = useLocalSearchParams<{ id: string }>();
@@ -68,8 +69,7 @@ export default function ClientScreen() {
 
   useEffect(() => {
     (async () => {
-      const raw = await AsyncStorage.getItem(STORAGE_KEYS.SERVERS_LIST);
-      const list: { id: string; url: string; label?: string }[] = raw ? JSON.parse(raw) : [];
+      const list = await getStorageJSON<ServerItem[]>(STORAGE_KEYS.SERVERS_LIST, []);
       const s = list.find((x) => x.id === params.id);
       if (!s) {
         Alert.alert("Server not found", "Please select a server again.");

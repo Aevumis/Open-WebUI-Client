@@ -1,11 +1,12 @@
 import * as FileSystem from "expo-file-system";
 import { CACHE_MAX_SIZE_BYTES, CACHE_EVICTION_TARGET } from "./constants";
 import { safeParseUrl } from "./url-utils";
+import { ConversationData } from "./types";
 
 export type CachedEntry = {
   url: string;
   capturedAt: number;
-  data: unknown; // JSON from API
+  data: ConversationData; // JSON from API
   title?: string;
 };
 
@@ -51,7 +52,8 @@ function parseIdFromUrl(url: string) {
     const idx = parts.findIndex((p) =>
       /(conversation|conversations|chat|thread|messages)/i.test(p)
     );
-    if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
+    const id = parts[idx + 1];
+    if (idx >= 0 && id) return id;
   }
   return String(Math.random()).slice(2);
 }

@@ -11,6 +11,7 @@ import {
 import { safeGetHost } from "./url-utils";
 import { STORAGE_KEYS } from "./storage-keys";
 import { ChatCompletionRequest, ServerSettings } from "./types";
+import { getStorageJSON, setStorageJSON } from "./storage-utils";
 
 // Mutex implementation to prevent race conditions in outbox operations
 // Each host gets its own lock to allow concurrent operations across different hosts
@@ -90,14 +91,14 @@ export async function getSettings(host: string): Promise<ServerSettings> {
     rps: DEFAULT_RPS,
     fullSyncOnLoad: true,
   };
-  try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEYS.serverSettings(host));
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      // Merge with defaults to remain compatible with older stored values
-      return { ...defaults, ...parsed } as ServerSettings;
-    }
-  } catch {}
+  const parsed = await getStorageJSON<Partial<ServerSettings> | null>(
+    STORAGE_KEYS.serverSettings(host),
+    null
+  );
+  if (parsed) {
+    // Merge with defaults to remain compatible with older stored values
+    return { ...defaults, ...parsed } as ServerSettings;
+  }
   return defaults;
 }
 
@@ -109,7 +110,7 @@ export async function getSettings(host: string): Promise<ServerSettings> {
 export async function setSettings(host: string, settings: Partial<ServerSettings>) {
   const current = await getSettings(host);
   const next = { ...current, ...settings };
-  await AsyncStorage.setItem(STORAGE_KEYS.serverSettings(host), JSON.stringify(next));
+  await setStorageJSON(STORAGE_KEYS.serverSettings(host), next);
 }
 
 /**
@@ -131,16 +132,11 @@ export async function getToken(host: string): Promise<string | null> {
 }
 
 async function getOutbox(host: string): Promise<OutboxItem[]> {
-  try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEYS.outbox(host));
-    return raw ? (JSON.parse(raw) as OutboxItem[]) : [];
-  } catch {
-    return [];
-  }
+  return getStorageJSON<OutboxItem[]>(STORAGE_KEYS.outbox(host), []);
 }
 
 async function setOutbox(host: string, items: OutboxItem[]) {
-  await AsyncStorage.setItem(STORAGE_KEYS.outbox(host), JSON.stringify(items));
+  await setStorageJSON(STORAGE_KEYS.outbox(host), items);
 }
 
 /**
@@ -187,6 +183,7 @@ async function cleanupOutbox(host: string): Promise<number> {
       const itemsToRemove = filtered.length - MAX_OUTBOX_ITEMS;
       // Sort by creation time (oldest first) and remove excess items
       const sortedByAge = [...filtered].sort((a, b) => a.createdAt - b.createdAt);
+      const oldestItem = sortedByAge[0];
       const oldestIds = sortedByAge.slice(0, itemsToRemove).map((item) => item.id);
 
       filtered = filtered.filter((item) => !oldestIds.includes(item.id));
@@ -196,7 +193,7 @@ async function cleanupOutbox(host: string): Promise<number> {
         host,
         itemsRemoved: itemsToRemove,
         totalItems: MAX_OUTBOX_ITEMS,
-        oldestItemAge: now - sortedByAge[0].createdAt,
+        oldestItemAge: oldestItem ? now - oldestItem.createdAt : 0,
       });
     }
 
@@ -324,6 +321,7 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
 
     for (let i = 0; i < list.length; i++) {
       const it = list[i];
+      if (!it) continue;
       try {
         const res = await fetch(serviceUrl, {
           method: "POST",

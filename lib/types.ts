@@ -25,3 +25,32 @@ export interface ServerItem {
   url: string;
   label?: string;
 }
+
+export interface ConversationData {
+  id: string;
+  title?: string;
+  chat?: {
+    messages?: Record<string, MessageNode>;
+    history?: {
+      messages: Record<string, MessageNode>;
+      currentId?: string;
+    };
+    currentId?: string;
+    title?: string;
+    timestamp?: number;
+  };
+  messages?: MessageNode[]; // Some API versions might use different structure
+  updated_at?: number;
+  updatedAt?: number;
+  created_at?: number;
+  timestamp?: number;
+  archived?: boolean;
+}
+
+export interface MessageNode {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  parentId?: string | null;
+  timestamp?: number;
+}

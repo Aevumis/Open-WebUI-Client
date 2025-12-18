@@ -14,27 +14,17 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Link, router } from "expo-router";
 import { STORAGE_KEYS } from "../lib/storage-keys";
-import { getSettings, setSettings, type ServerSettings } from "../lib/outbox";
+import { getSettings, setSettings } from "../lib/outbox";
+import { ServerSettings, ServerItem } from "../lib/types";
 import { safeGetHost, safeParseUrl } from "../lib/url-utils";
-
-type ServerItem = {
-  id: string;
-  url: string;
-  label?: string;
-};
+import { getStorageJSON, setStorageJSON } from "../lib/storage-utils";
 
 async function getServers(): Promise<ServerItem[]> {
-  const raw = await AsyncStorage.getItem(STORAGE_KEYS.SERVERS_LIST);
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
+  return getStorageJSON<ServerItem[]>(STORAGE_KEYS.SERVERS_LIST, []);
 }
 
 async function setServers(list: ServerItem[]) {
-  await AsyncStorage.setItem(STORAGE_KEYS.SERVERS_LIST, JSON.stringify(list));
+  await setStorageJSON(STORAGE_KEYS.SERVERS_LIST, list);
 }
 
 async function getActive(): Promise<string | null> {
@@ -60,7 +50,7 @@ function isPrivateIP(hostname: string): boolean {
   // IPv4 pattern matching for private ranges
   const ipv4Pattern = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/;
   const match = hostname.match(ipv4Pattern);
-  if (match) {
+  if (match && match[1] && match[2]) {
     const [, octet1, octet2] = match;
     const first = parseInt(octet1, 10);
     const second = parseInt(octet2, 10);

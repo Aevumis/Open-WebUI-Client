@@ -10,6 +10,7 @@ import {
   useColorScheme,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
 import { safeGetHost } from "../lib/url-utils";
 import { router } from "expo-router";
@@ -17,6 +18,8 @@ import { useNavigation } from "@react-navigation/native";
 import { isFullSyncDone } from "../lib/sync";
 import { getSettings } from "../lib/outbox";
 import { ServerItem } from "../lib/types";
+import { getStorageJSON } from "../lib/storage-utils";
+import { STORAGE_KEYS } from "../lib/storage-keys";
 
 export default function OfflineScreen() {
   const navigation = useNavigation();
@@ -113,15 +116,12 @@ export default function OfflineScreen() {
       if (idx.length === 0) {
         try {
           // Get the most recent server from storage to check sync status
-          const serversRaw = await import("@react-native-async-storage/async-storage").then((m) =>
-            m.default.getItem("servers:list")
-          );
-          const activeRaw = await import("@react-native-async-storage/async-storage").then((m) =>
-            m.default.getItem("servers:active")
-          );
-          if (serversRaw && activeRaw) {
-            const servers: ServerItem[] = JSON.parse(serversRaw);
-            const activeServer = servers.find((s) => s.id === activeRaw);
+          const [servers, activeRaw] = await Promise.all([
+            getStorageJSON<ServerItem[]>(STORAGE_KEYS.SERVERS_LIST, []),
+            AsyncStorage.getItem(STORAGE_KEYS.SERVERS_ACTIVE),
+          ]);
+          if (servers.length > 0 && activeRaw) {
+            const activeServer = servers.find((s: ServerItem) => s.id === activeRaw);
             if (activeServer) {
               const host = safeGetHost(activeServer.url) || "";
               const syncDone = await isFullSyncDone(activeServer.url);
