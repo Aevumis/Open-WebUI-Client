@@ -32,7 +32,9 @@ export function log(scope: string, level: LogLevel, ...args: unknown[]) {
   try {
     // eslint-disable-next-line no-console
     console.log(`[${scope}]`, ...args);
-  } catch {}
+  } catch {
+    // Fallback if console.log fails (e.g. in some weird environments)
+  }
 }
 
 export function debug(scope: string, ...args: unknown[]) {

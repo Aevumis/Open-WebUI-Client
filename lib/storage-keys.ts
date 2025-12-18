@@ -16,4 +16,8 @@ export const STORAGE_KEYS = {
   syncDone: (host: string) => `sync:done:${host}`,
   syncLastTime: (host: string) => `sync:lastTime:${host}`,
   syncVersion: (host: string) => `sync:version:${host}`,
+
+  // Service Worker Hints
+  swHint: (host: string) => `swhint:${host}`,
+  swHintPending: (host: string) => `swhint:${host}:pending`,
 } as const;

@@ -22,6 +22,7 @@ import { safeGetHost } from "../lib/url-utils";
 import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getStorageJSON } from "../lib/storage-utils";
 import { ServerItem } from "../lib/types";
+import { getErrorMessage } from "../lib/error-utils";
 
 export default function ClientScreen() {
   const params = useLocalSearchParams<{ id: string }>();
@@ -91,7 +92,9 @@ export default function ClientScreen() {
           const c = await count(host);
           setQueuedCount(c);
         }
-      } catch {}
+      } catch (e) {
+        logDebug("client", "count error", { error: getErrorMessage(e) });
+      }
     })();
   }, [url]);
 
@@ -123,7 +126,9 @@ export default function ClientScreen() {
                   const idx = await getCacheIndex();
                   const count = idx.filter((it) => it.host === host).length;
                   logInfo("cache", "index count for host", { host, count });
-                } catch {}
+                } catch (e) {
+                  logDebug("client", "cache index error", { error: getErrorMessage(e) });
+                }
               }
               logInfo("sync", "maybeFullSync done");
             }
@@ -132,23 +137,33 @@ export default function ClientScreen() {
             logInfo("sync", "fullSyncOnLoad disabled, skip maybeFullSync");
           }
         }
-      } catch {}
+      } catch (e) {
+        logDebug("client", "sync attempt error", { error: getErrorMessage(e) });
+      }
       try {
         logInfo("outbox", "drain start");
         const dres = await drain(url);
         logInfo("outbox", "drain result", dres);
         try {
           setQueuedCount(dres.remaining);
-        } catch {}
+        } catch (e) {
+          logDebug("client", "queuedCount update error", { error: String(e) });
+        }
         try {
           if (dres.sent > 0) {
             try {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-            } catch {}
+            } catch (e) {
+              logDebug("client", "haptics error", { error: String(e) });
+            }
             Toast.show({ type: "success", text1: `Sent ${dres.sent} queued` });
           }
-        } catch {}
-      } catch {}
+        } catch (e) {
+          logDebug("client", "toast error", { error: String(e) });
+        }
+      } catch (e) {
+        logDebug("client", "drain attempt error", { error: getErrorMessage(e) });
+      }
       running = false;
     };
 
@@ -179,7 +194,9 @@ export default function ClientScreen() {
           clearInterval(timer);
           return;
         }
-      } catch {}
+      } catch (e) {
+        logDebug("client", "interval check error", { error: getErrorMessage(e) });
+      }
       await attempt();
     }, SYNC_INTERVAL);
 

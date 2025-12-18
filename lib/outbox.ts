@@ -10,70 +10,15 @@ import {
 } from "./constants";
 import { safeGetHost } from "./url-utils";
 import { STORAGE_KEYS } from "./storage-keys";
-import { ChatCompletionRequest, ServerSettings } from "./types";
+import { ChatCompletionRequest, ChatCompletionBody, ServerSettings } from "./types";
+import { getErrorMessage } from "./error-utils";
+import { withLock } from "./mutex";
 import { getStorageJSON, setStorageJSON } from "./storage-utils";
-
-// Mutex implementation to prevent race conditions in outbox operations
-// Each host gets its own lock to allow concurrent operations across different hosts
-const outboxLocks = new Map<string, Promise<void>>();
-
-/**
- * Acquires an exclusive lock for outbox operations on a specific host.
- * @param host - The host to lock for outbox operations
- * @returns Promise that resolves to a release function when the lock is acquired
- * @throws Error if the lock cannot be acquired within 30 seconds
- */
-async function acquireLock(host: string): Promise<() => void> {
-  const timeout = OUTBOX_LOCK_TIMEOUT; // 30 seconds to prevent deadlocks
-
-  // Wait for any existing lock on this host
-  if (outboxLocks.has(host)) {
-    await outboxLocks.get(host);
-  }
-
-  let releaseLock: () => void;
-  const lockPromise = new Promise<void>((resolve) => {
-    releaseLock = () => {
-      outboxLocks.delete(host);
-      resolve();
-    };
-  });
-
-  outboxLocks.set(host, lockPromise);
-
-  // Create timeout promise to prevent deadlocks
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => {
-      outboxLocks.delete(host);
-      reject(new Error(`Outbox lock timeout for host: ${host}`));
-    }, timeout);
-  });
-
-  // Return the release function, but ensure we don't timeout while getting it
-  return Promise.race([Promise.resolve(releaseLock!), timeoutPromise]);
-}
-
-/**
- * Wraps a function with outbox locking to ensure atomic operations.
- * This prevents race conditions when multiple concurrent operations attempt
- * to read-modify-write the outbox data.
- * @param host - The host to lock for outbox operations
- * @param fn - The async function to execute while holding the lock
- * @returns Promise that resolves with the function's result
- */
-async function withOutboxLock<T>(host: string, fn: () => Promise<T>): Promise<T> {
-  const releaseLock = await acquireLock(host);
-  try {
-    return await fn();
-  } finally {
-    releaseLock();
-  }
-}
 
 export type OutboxItem = {
   id: string; // local UUID
   chatId: string;
-  body: ChatCompletionRequest; // JSON payload for /api/chat/completions
+  body: ChatCompletionBody; // JSON payload for /api/chat/completions (or simplified fallback)
   createdAt: number;
   tries: number;
   lastError?: string;
@@ -146,7 +91,7 @@ async function setOutbox(host: string, items: OutboxItem[]) {
  * @returns Promise that resolves to the count of items removed
  */
 async function cleanupOutbox(host: string): Promise<number> {
-  return withOutboxLock(host, async () => {
+  return withLock(host, OUTBOX_LOCK_TIMEOUT, async () => {
     const list = await getOutbox(host);
     const now = Date.now();
 
@@ -227,7 +172,7 @@ export async function listOutbox(host: string): Promise<OutboxItem[]> {
  * @param ids - Array of item IDs to remove
  */
 export async function removeOutboxItems(host: string, ids: string[]) {
-  return withOutboxLock(host, async () => {
+  return withLock(host, OUTBOX_LOCK_TIMEOUT, async () => {
     const list = await getOutbox(host);
     const next = list.filter((it) => !ids.includes(it.id));
     await setOutbox(host, next);
@@ -240,7 +185,7 @@ export async function removeOutboxItems(host: string, ids: string[]) {
  * @param item - The item details (without tries/createdAt)
  */
 export async function enqueue(host: string, item: Omit<OutboxItem, "tries" | "createdAt">) {
-  return withOutboxLock(host, async () => {
+  return withLock(host, OUTBOX_LOCK_TIMEOUT, async () => {
     const list = await getOutbox(host);
     const next: OutboxItem = { ...item, tries: 0, createdAt: Date.now() };
     list.push(next);
@@ -264,7 +209,7 @@ export async function enqueue(host: string, item: Omit<OutboxItem, "tries" | "cr
  * @returns The count of items
  */
 export async function count(host: string) {
-  return withOutboxLock(host, async () => {
+  return withLock(host, OUTBOX_LOCK_TIMEOUT, async () => {
     const list = await getOutbox(host);
     return list.length;
   });
@@ -287,7 +232,7 @@ export async function drain(baseUrl: string): Promise<{ sent: number; remaining:
     return { sent: 0, remaining: 0 };
   }
 
-  return withOutboxLock(host, async () => {
+  return withLock(host, OUTBOX_LOCK_TIMEOUT, async () => {
     // Clean up old/failed items before processing
     const removedCount = await cleanupOutbox(host);
     if (removedCount > 0) {

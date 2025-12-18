@@ -54,3 +54,25 @@ export interface MessageNode {
   parentId?: string | null;
   timestamp?: number;
 }
+
+export type ChatCompletionBody = ChatCompletionRequest | { uiText: string };
+
+export type WebViewMessage =
+  | { type: "debug"; message: string; scope?: string; event?: string; [key: string]: unknown }
+  | {
+      type: "swStatus";
+      status?: number | string;
+      hasSW: boolean;
+      swFunctional?: boolean;
+      method?: string;
+      error?: string;
+    }
+  | { type: "drainBatchResult"; sent: number; remaining: number; successIds: string[] }
+  | { type: "drainBatchError"; error: string }
+  | { type: "authToken"; token: string }
+  | { type: "themeProbe"; payload: unknown }
+  | { type: "syncDone"; conversations: number; messages: number }
+  | { type: "queueMessage"; chatId: string; body: ChatCompletionBody }
+  | { type: "externalLink"; url: string }
+  | { type: "cacheResponse"; url: string; data: unknown; title?: string }
+  | { type: "downloadBlob"; base64: string; filename: string; mime: string };

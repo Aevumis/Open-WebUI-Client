@@ -32,8 +32,13 @@ import {
 import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getErrorMessage } from "../lib/error-utils";
+import { WebViewMessage, ChatCompletionBody, ConversationData } from "../lib/types";
 
-type WebViewPermissionRequest = any; // Fallback to any for now to continue fixing other strict errors
+type WebViewPermissionRequest = {
+  resources: string[];
+  grant: (resources: string[]) => void;
+  deny: () => void;
+};
 
 function buildInjectionBoilerplate(allowedHost: string) {
   return `
@@ -704,11 +709,11 @@ function buildThemeBootstrap(scheme: "dark" | "light" | null) {
   } catch(_){ } })();`;
 }
 
-function handleDebug(msg: any) {
+function handleDebug(msg: Extract<WebViewMessage, { type: "debug" }>) {
   logDebug("webview", "debug", msg);
 }
 
-async function handleAuthToken(msg: any, host: string) {
+async function handleAuthToken(msg: Extract<WebViewMessage, { type: "authToken" }>, host: string) {
   if (typeof msg.token === "string") {
     await setToken(host, msg.token);
 
@@ -716,7 +721,11 @@ async function handleAuthToken(msg: any, host: string) {
   }
 }
 
-async function handleSyncDone(msg: any, host: string, syncingRef: React.MutableRefObject<boolean>) {
+async function handleSyncDone(
+  msg: Extract<WebViewMessage, { type: "syncDone" }>,
+  host: string,
+  syncingRef: React.MutableRefObject<boolean>
+) {
   try {
     await AsyncStorage.setItem(STORAGE_KEYS.syncDone(host), String(Date.now()));
 
@@ -727,16 +736,19 @@ async function handleSyncDone(msg: any, host: string, syncingRef: React.MutableR
 
       messages: msg.messages,
     });
-  } catch {}
+  } catch (e) {
+    logDebug("webview", "handleSyncDone error", { error: getErrorMessage(e) });
+  }
 
   syncingRef.current = false;
 }
 
 async function handleQueueMessage(
-  msg: any,
-
+  msg: Extract<WebViewMessage, { type: "queueMessage" }> & {
+    chatId?: string;
+    body?: ChatCompletionBody;
+  },
   host: string,
-
   onQueueCountChange?: (count: number) => void
 ) {
   if (msg.chatId && msg.body) {
@@ -760,7 +772,9 @@ async function handleQueueMessage(
       } catch {}
 
       Toast.show({ type: "info", text1: "Message queued" });
-    } catch {}
+    } catch (e) {
+      logDebug("webview", "handleQueueMessage toast error", { error: getErrorMessage(e) });
+    }
 
     try {
       onQueueCountChange && onQueueCountChange(c);
@@ -768,7 +782,7 @@ async function handleQueueMessage(
   }
 }
 
-async function handleDownloadBlob(msg: any) {
+async function handleDownloadBlob(msg: Extract<WebViewMessage, { type: "downloadBlob" }>) {
   if (msg.base64) {
     const filename = msg.filename || "download";
 
@@ -790,11 +804,18 @@ async function handleDownloadBlob(msg: any) {
   }
 }
 
-async function handleSwStatus(msg: any, host: string) {
+async function handleSwStatus(
+  msg: Extract<WebViewMessage, { type: "swStatus" }> & {
+    hasSW?: boolean;
+    swFunctional?: boolean;
+    method?: string;
+  },
+  host: string
+) {
   logInfo("webview", "swStatus", msg);
   try {
-    const key = `swhint:${host}`;
-    const pendingKey = `${key}:pending`;
+    const key = STORAGE_KEYS.swHint(host);
+    const pendingKey = STORAGE_KEYS.swHintPending(host);
     const shownCount = parseInt((await AsyncStorage.getItem(key)) || "0");
 
     // If this is an "unsupported" detection (early timing issue), delay the warning
@@ -879,11 +900,13 @@ async function handleSwStatus(msg: any, host: string) {
       await AsyncStorage.removeItem(key);
       logInfo("webview", "swWorking", { host, method: msg.method });
     }
-  } catch {}
+  } catch (e) {
+    logDebug("webview", "handleSwStatus error", { error: getErrorMessage(e) });
+  }
 }
 
 async function handleDrainBatchResult(
-  msg: any,
+  msg: Extract<WebViewMessage, { type: "drainBatchResult" }>,
   host: string,
   drainingRef: React.MutableRefObject<boolean>,
   onQueueCountChange?: (count: number) => void,
@@ -898,13 +921,19 @@ async function handleDrainBatchResult(
       if (msg.successIds.length > 0) {
         try {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-        } catch {}
+        } catch (e) {
+          logDebug("webview", "haptics error", { error: getErrorMessage(e) });
+        }
         Toast.show({ type: "success", text1: `Sent ${msg.successIds.length} queued` });
       }
-    } catch {}
+    } catch (e) {
+      logDebug("webview", "handleDrainBatchResult toast error", { error: getErrorMessage(e) });
+    }
     try {
       onQueueCountChange && onQueueCountChange(remaining);
-    } catch {}
+    } catch (e) {
+      logDebug("webview", "onQueueCountChange error", { error: getErrorMessage(e) });
+    }
     if (!token && remaining > 0 && injectWebDrainBatch) {
       await injectWebDrainBatch();
     } else {
@@ -913,30 +942,38 @@ async function handleDrainBatchResult(
   }
 }
 
-function handleDrainBatchError(msg: any, drainingRef: React.MutableRefObject<boolean>) {
+function handleDrainBatchError(
+  msg: Extract<WebViewMessage, { type: "drainBatchError" }>,
+  drainingRef: React.MutableRefObject<boolean>
+) {
   logInfo("webviewDrain", "batch error", { error: msg.error });
   drainingRef.current = false;
 }
 
-function handleThemeProbe(msg: any) {
+function handleThemeProbe(msg: Extract<WebViewMessage, { type: "themeProbe" }>) {
   if (msg.payload) {
     try {
       logInfo("theme", "probe", msg.payload);
-    } catch {}
+    } catch (e) {
+      logDebug("theme", "probe error", { error: getErrorMessage(e) });
+    }
   }
 }
 
-async function handleExternalLink(msg: any) {
+async function handleExternalLink(msg: Extract<WebViewMessage, { type: "externalLink" }>) {
   if (typeof msg.url === "string") {
     await WebBrowser.openBrowserAsync(msg.url);
   }
 }
 
-async function handleCacheResponse(msg: any, host: string) {
+async function handleCacheResponse(
+  msg: Extract<WebViewMessage, { type: "cacheResponse" }>,
+  host: string
+) {
   const entry: CachedEntry = {
     url: msg.url,
     capturedAt: Date.now(),
-    data: msg.data,
+    data: msg.data as ConversationData,
   };
   await cacheApiResponse(host, entry);
 }
@@ -990,7 +1027,9 @@ export default function OpenWebUIView({
           logDebug("permissions", "proactive request error", { error: getErrorMessage(error) });
         }
       })();
-    } catch {}
+    } catch (e) {
+      logDebug("webview", "mount error", { error: getErrorMessage(e) });
+    }
   }, [baseUrl]);
 
   // Inject one batch of webview-assisted drain using page cookies (fallback when no native token)
@@ -1084,7 +1123,9 @@ export default function OpenWebUIView({
         }
       })(); })();`;
       webref.current?.injectJavaScript(js);
-    } catch {}
+    } catch (e) {
+      logDebug("webviewDrain", "inject error", { error: getErrorMessage(e) });
+    }
   }, []);
 
   // WebView-assisted full sync for when cookies exist but native token is not available (httpOnly)
@@ -1148,7 +1189,9 @@ export default function OpenWebUIView({
       })(); })();`;
       syncingRef.current = true;
       webref.current?.injectJavaScript(js);
-    } catch {}
+    } catch (e) {
+      logDebug("sync", "inject error", { error: getErrorMessage(e) });
+    }
   }, []);
 
   const onMessage = useCallback(
@@ -1212,7 +1255,9 @@ export default function OpenWebUIView({
         try {
           logDebug("webview", "onMessageError", { error: getErrorMessage(err) });
           logDebug("webview", "raw", String(e?.nativeEvent?.data || ""));
-        } catch {}
+        } catch {
+          // Final fallback to prevent loop
+        }
       }
     },
     [baseUrl, injectWebDrainBatch, injectWebSync, onQueueCountChange]
@@ -1230,7 +1275,9 @@ export default function OpenWebUIView({
     try {
       const js = `(function(){try{ window.__owui_rnOnline = ${online ? "true" : "false"}; if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){ window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'rn',event:'online',online:${online ? "true" : "false"}})); } }catch(_){}})();`;
       webref.current?.injectJavaScript(js);
-    } catch {}
+    } catch (e) {
+      logDebug("webview", "connectivity inject error", { error: getErrorMessage(e) });
+    }
   }, [online]);
 
   // Debug: inject a theme probe to read the page's current theme-related state
@@ -1253,7 +1300,9 @@ export default function OpenWebUIView({
         window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'themeProbe', payload: { hasDarkClass, dataTheme, colorSchemeStyle, localTheme, localResolved, mqlDark, rnScheme, pageBg, htmlBg } }));
       }catch(e){ try{ window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'probe', event:'themeProbeError', message:String(e && e.message || e) })); }catch(_){} }})();`;
       webref.current?.injectJavaScript(js);
-    } catch {}
+    } catch (e) {
+      logDebug("theme", "inject probe error", { error: getErrorMessage(e) });
+    }
   }, [dev]);
 
   // Apply device color scheme inside the WebView (helps when matchMedia doesn't reflect OS in RN WebView)
@@ -1289,7 +1338,9 @@ export default function OpenWebUIView({
         // Note: react-native-webview supports forceDarkOn on Android; use it to encourage dark rendering where applicable
         logInfo("theme", "android forceDarkOn set", { forceDarkOn: !!dark });
       }
-    } catch {}
+    } catch (e) {
+      logDebug("theme", "apply scheme error", { error: getErrorMessage(e) });
+    }
   }, [colorScheme, injectThemeProbe, isAndroid]);
 
   // On becoming online: if no native token but outbox has items, start webview-assisted drain
@@ -1314,7 +1365,9 @@ export default function OpenWebUIView({
       webref.current?.injectJavaScript(`${injected};true;`);
       // Also perform a theme probe early
       injectThemeProbe();
-    } catch {}
+    } catch (e) {
+      logDebug("webview", "manual inject error", { error: getErrorMessage(e) });
+    }
   }, [injected, injectThemeProbe]);
 
   // Cleanup WebView intervals on unmount
@@ -1341,7 +1394,9 @@ export default function OpenWebUIView({
             })();
 
           `);
-      } catch {}
+      } catch (e) {
+        logDebug("webview", "cleanup error", { error: getErrorMessage(e) });
+      }
     };
   }, []);
 
@@ -1420,9 +1475,11 @@ export default function OpenWebUIView({
           // Re-assert theme via bootstrap notify if available
           const APPLY = `(function(){try{var isDark=${colorScheme === "dark" ? "true" : "false"}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
           webref.current?.injectJavaScript(APPLY);
-          // Probe current theme state after load
+          // Re-probe theme on each navigation to capture changes from the app
           injectThemeProbe();
-        } catch {}
+        } catch (e) {
+          logDebug("webview", "onLoadEnd error", { error: getErrorMessage(e) });
+        }
       }}
       onNavigationStateChange={(navState) => {
         try {
@@ -1438,12 +1495,16 @@ export default function OpenWebUIView({
           webref.current?.injectJavaScript(APPLY);
           // Re-probe theme on each navigation to capture changes from the app
           injectThemeProbe();
-        } catch {}
+        } catch (e) {
+          logDebug("webview", "nav change error", { error: getErrorMessage(e) });
+        }
       }}
       onError={(syntheticEvent) => {
         try {
           logInfo("webview", "error", syntheticEvent.nativeEvent);
-        } catch {}
+        } catch (e) {
+          logDebug("webview", "onError handler error", { error: getErrorMessage(e) });
+        }
       }}
       allowsBackForwardNavigationGestures
       startInLoadingState

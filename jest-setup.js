@@ -1,5 +1,8 @@
 import "@testing-library/jest-native/extend-expect";
 
+// Fix for jest-expo preset issues
+jest.mock("expo/src/async-require/messageSocket", () => ({}), { virtual: true });
+
 // Mock AsyncStorage
 jest.mock("@react-native-async-storage/async-storage", () =>
   require("@react-native-async-storage/async-storage/jest/async-storage-mock")
