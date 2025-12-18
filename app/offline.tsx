@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, FlatList, ScrollView, Text, TextInput, TouchableOpacity, View, useColorScheme } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
+import { safeGetHost } from "../lib/url-utils";
 import { router } from "expo-router";
 import { useNavigation } from "@react-navigation/native";
 import { isFullSyncDone } from "../lib/sync";
@@ -103,7 +104,7 @@ export default function OfflineScreen() {
             const servers = JSON.parse(serversRaw);
             const activeServer = servers.find((s: any) => s.id === activeRaw);
             if (activeServer) {
-              const host = new URL(activeServer.url).host;
+              const host = safeGetHost(activeServer.url) || '';
               const syncDone = await isFullSyncDone(activeServer.url);
               const settings = await getSettings(host);
               setSyncInfo({ host, syncDone, syncEnabled: settings.fullSyncOnLoad });

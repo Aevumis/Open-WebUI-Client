@@ -1,4 +1,6 @@
 import * as FileSystem from "expo-file-system";
+import { CACHE_MAX_SIZE_BYTES, CACHE_EVICTION_TARGET } from "./constants";
+import { safeParseUrl } from "./url-utils";
 
 export type CachedEntry = {
   url: string;
@@ -18,7 +20,8 @@ export type CacheIndexItem = {
 
 const ROOT = FileSystem.documentDirectory + "openwebui-cache/";
 const INDEX_PATH = ROOT + "index.json";
-const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+
+let evictionInProgress = false;
 
 async function ensureDir(path: string) {
   await FileSystem.makeDirectoryAsync(path, { intermediates: true }).catch(() => {});
@@ -42,12 +45,12 @@ function entryPath(host: string, id: string) {
 }
 
 function parseIdFromUrl(url: string) {
-  try {
-    const u = new URL(url);
+  const u = safeParseUrl(url);
+  if (u) {
     const parts = u.pathname.split('/').filter(Boolean);
     const idx = parts.findIndex(p => /(conversation|conversations|chat|thread|messages)/i.test(p));
     if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
-  } catch {}
+  }
   return String(Math.random()).slice(2);
 }
 
@@ -72,6 +75,41 @@ export async function getCacheIndex(): Promise<CacheIndexItem[]> {
   return Object.values(idx).sort((a, b) => b.lastAccess - a.lastAccess);
 }
 
+/**
+ * Recalculates the total cache size by checking the actual file system.
+ * Removes index entries for files that no longer exist.
+ * @returns Promise resolving to the actual total size in bytes
+ */
+export async function recalculateSize(): Promise<number> {
+  const idx = (await readJSON<Record<string, CacheIndexItem>>(INDEX_PATH)) || {};
+  let actualSize = 0;
+  let changed = false;
+
+  for (const [key, meta] of Object.entries(idx)) {
+    try {
+      const info = await FileSystem.getInfoAsync(entryPath(meta.host, meta.id));
+      if (info.exists) {
+        if (info.size !== meta.size) {
+          meta.size = info.size || 0;
+          changed = true;
+        }
+        actualSize += meta.size;
+      } else {
+        // File missing, remove from index
+        delete idx[key];
+        changed = true;
+      }
+    } catch {
+      // Skip error checking for individual files
+    }
+  }
+
+  if (changed) {
+    await writeJSON(INDEX_PATH, idx);
+  }
+  return actualSize;
+}
+
 async function touchIndex(host: string, id: string, title?: string) {
   const key = `${host}/${id}`;
   const idx = (await readJSON<Record<string, CacheIndexItem>>(INDEX_PATH)) || {};
@@ -94,18 +132,29 @@ async function totalSize(idx: Record<string, CacheIndexItem>) {
 }
 
 async function enforceLimit() {
-  const idx = (await readJSON<Record<string, CacheIndexItem>>(INDEX_PATH)) || {};
-  let size = await totalSize(idx);
-  if (size <= MAX_BYTES) return;
-  // LRU eviction
-  const items = Object.values(idx).sort((a, b) => a.lastAccess - b.lastAccess);
-  for (const it of items) {
-    if (size <= MAX_BYTES) break;
-    try {
-      await FileSystem.deleteAsync(entryPath(it.host, it.id), { idempotent: true });
-    } catch {}
-    size -= it.size || 0;
-    delete idx[it.key];
+  if (evictionInProgress) return;
+  evictionInProgress = true;
+  try {
+    const idx = (await readJSON<Record<string, CacheIndexItem>>(INDEX_PATH)) || {};
+    let size = await totalSize(idx);
+    if (size <= CACHE_MAX_SIZE_BYTES) return;
+
+    // LRU eviction
+    const items = Object.values(idx).sort((a, b) => a.lastAccess - b.lastAccess);
+    const targetSize = CACHE_MAX_SIZE_BYTES * CACHE_EVICTION_TARGET;
+
+    for (const it of items) {
+      if (size <= targetSize) break;
+      try {
+        await FileSystem.deleteAsync(entryPath(it.host, it.id), { idempotent: true });
+        size -= it.size || 0;
+        delete idx[it.key];
+      } catch {
+        // Continue with next file if deletion fails
+      }
+    }
+    await writeJSON(INDEX_PATH, idx);
+  } finally {
+    evictionInProgress = false;
   }
-  await writeJSON(INDEX_PATH, idx);
 }

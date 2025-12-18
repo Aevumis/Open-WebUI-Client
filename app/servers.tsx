@@ -3,10 +3,9 @@ import { Alert, FlatList, KeyboardAvoidingView, Platform, Text, TextInput, Touch
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Link, router } from "expo-router";
+import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getSettings, setSettings, type ServerSettings } from "../lib/outbox";
-
-const STORAGE_KEY = "servers:list";
-const ACTIVE_KEY = "servers:active";
+import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 
 type ServerItem = {
   id: string;
@@ -15,7 +14,7 @@ type ServerItem = {
 };
 
 async function getServers(): Promise<ServerItem[]> {
-  const raw = await AsyncStorage.getItem(STORAGE_KEY);
+  const raw = await AsyncStorage.getItem(STORAGE_KEYS.SERVERS_LIST);
   if (!raw) return [];
   try {
     return JSON.parse(raw);
@@ -25,27 +24,73 @@ async function getServers(): Promise<ServerItem[]> {
 }
 
 async function setServers(list: ServerItem[]) {
-  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  await AsyncStorage.setItem(STORAGE_KEYS.SERVERS_LIST, JSON.stringify(list));
 }
 
 async function getActive(): Promise<string | null> {
-  return AsyncStorage.getItem(ACTIVE_KEY);
+  return AsyncStorage.getItem(STORAGE_KEYS.SERVERS_ACTIVE);
 }
 
 async function setActive(id: string) {
-  await AsyncStorage.setItem(ACTIVE_KEY, id);
+  await AsyncStorage.setItem(STORAGE_KEYS.SERVERS_ACTIVE, id);
 }
 
-function normalizeUrl(input: string): string | null {
-  try {
-    const u = new URL(input.trim());
-    if (!/^https?:$/.test(u.protocol)) return null;
-    // Ensure no trailing slash for base
-    u.pathname = u.pathname.replace(/\/$/, "");
-    return u.toString();
-  } catch {
-    return null;
+function isPrivateIP(hostname: string): boolean {
+  // Check for localhost variations
+  if (hostname === 'localhost' ||
+      hostname === 'localhost.localdomain' ||
+      hostname.endsWith('.localhost') ||
+      hostname === '0.0.0.0' ||
+      hostname.startsWith('127.')) {
+    return true;
   }
+
+  // IPv4 pattern matching for private ranges
+  const ipv4Pattern = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/;
+  const match = hostname.match(ipv4Pattern);
+  if (match) {
+    const [, octet1, octet2] = match;
+    const first = parseInt(octet1, 10);
+    const second = parseInt(octet2, 10);
+
+    // 10.0.0.0 - 10.255.255.255 (10/8 prefix)
+    if (first === 10) return true;
+
+    // 172.16.0.0 - 172.31.255.255 (172.16/12 prefix)
+    if (first === 172 && second >= 16 && second <= 31) return true;
+
+    // 192.168.0.0 - 192.168.255.255 (192.168/16 prefix)
+    if (first === 192 && second === 168) return true;
+
+    // 169.254.0.0 - 169.254.255.255 (Link-local)
+    if (first === 169 && second === 254) return true;
+  }
+
+  // Check for private/internal TLDs
+  const privateTlds = ['.internal', '.corp', '.home', '.lan'];
+  if (privateTlds.some(tld => hostname.endsWith(tld))) {
+    return true;
+  }
+
+  return false;
+}
+
+function normalizeUrl(input: string): { url: string; warning?: string } | null {
+  const u = safeParseUrl(input.trim());
+  if (!u) return null;
+  if (!/^https?:$/.test(u.protocol)) return null;
+
+  // Check if hostname is a private/internal address
+  const isPrivate = isPrivateIP(u.hostname);
+  let warning: string | undefined;
+
+  if (isPrivate) {
+    warning = "You're connecting to an internal/local address. Please ensure this is intentional.";
+  }
+
+  // Ensure no trailing slash for base
+  u.pathname = u.pathname.replace(/\/$/, "");
+  return { url: u.toString(), warning };
 }
 
 export default function ServersScreen() {
@@ -100,17 +145,44 @@ export default function ServersScreen() {
   }, []);
 
   const add = async () => {
-    const norm = normalizeUrl(url);
-    if (!norm) {
+    const result = normalizeUrl(url);
+    if (!result) {
       Alert.alert("Invalid URL", "Please enter a valid http(s) URL.");
       return;
     }
-    const id = `${Date.now()}`;
-    const next = [...servers, { id, url: norm, label: label || undefined }];
-    setLocalServers(next);
-    await setServers(next);
-    setUrl("");
-    setLabel("");
+
+    const { url: normalizedUrl, warning } = result;
+
+    if (warning) {
+      Alert.alert(
+        "Security Warning",
+        `${warning}\n\nDo you want to continue adding this server?`,
+        [
+          {
+            text: "Cancel",
+            style: "cancel"
+          },
+          {
+            text: "Add Anyway",
+            onPress: async () => {
+              const id = `${Date.now()}`;
+              const next = [...servers, { id, url: normalizedUrl, label: label || undefined }];
+              setLocalServers(next);
+              await setServers(next);
+              setUrl("");
+              setLabel("");
+            }
+          }
+        ]
+      );
+    } else {
+      const id = `${Date.now()}`;
+      const next = [...servers, { id, url: normalizedUrl, label: label || undefined }];
+      setLocalServers(next);
+      await setServers(next);
+      setUrl("");
+      setLabel("");
+    }
   };
 
   const remove = async (id: string) => {
@@ -130,7 +202,8 @@ export default function ServersScreen() {
 
   const openSettings = async (item: ServerItem) => {
     try {
-      const host = new URL(item.url).host;
+      const host = safeGetHost(item.url);
+      if (!host) throw new Error("Invalid URL");
       const s: ServerSettings = await getSettings(host);
       setFormLimit(String(s.limitConversations));
       setFormRps(String(s.rps));
@@ -146,7 +219,8 @@ export default function ServersScreen() {
 
   const saveSettings = async (item: ServerItem) => {
     try {
-      const host = new URL(item.url).host;
+      const host = safeGetHost(item.url);
+      if (!host) throw new Error("Invalid URL");
       const limit = Math.max(1, Math.min(500, Number.parseInt(formLimit || "30", 10) || 30));
       const rps = Math.max(1, Math.min(50, Number.parseInt(formRps || "5", 10) || 5));
       await setSettings(host, { limitConversations: limit, rps, fullSyncOnLoad: formFullSync });
@@ -280,4 +354,5 @@ export default function ServersScreen() {
     </SafeAreaView>
   );
 }
+
 

@@ -12,13 +12,24 @@ import { enqueue, setToken, count, getToken, listOutbox, removeOutboxItems, getS
 import { debug as logDebug, info as logInfo } from "../lib/log";
 import Toast from "react-native-toast-message";
 import * as Haptics from "expo-haptics";
+import { 
+  WEBVIEW_LOAD_TIMEOUT, 
+  AUTH_POLLING_INTERVAL, 
+  AUTH_CAPTURE_TIMEOUT,
+  SW_READY_WAIT, 
+  SW_DETECTION_DELAY,
+  WEBVIEW_DRAIN_TIMEOUT,
+  WEBVIEW_DRAIN_CHECK_INTERVAL
+} from "../lib/constants";
+import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 
 // WebView debug logs are now gated via centralized logger scopes/levels
 
 function buildInjection(baseUrl: string) {
   // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
   // Post messages to React Native with type keys for native handling.
-  const allowedHost = JSON.stringify(new URL(baseUrl).host);
+  const h = safeGetHost(baseUrl);
+  const allowedHost = JSON.stringify(h || '');
   return `(() => {
     try {
       if (window.__owui_injected) {
@@ -40,6 +51,34 @@ function buildInjection(baseUrl: string) {
         var RN = (window && window.ReactNativeWebView) ? window.ReactNativeWebView : null;
         if (RN && RN.postMessage) RN.postMessage(JSON.stringify(msg));
       } catch (_) {}
+    }
+
+    // Sanitization functions to prevent XSS vulnerabilities
+    function sanitizeText(text) {
+      try {
+        if (typeof text !== 'string') {
+          text = String(text || '');
+        }
+        // Limit to 50,000 characters
+        if (text.length > 50000) {
+          text = text.substring(0, 50000);
+        }
+        // Remove null bytes and control characters (except common whitespace)
+        text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+        return text;
+      } catch (_) {
+        return '';
+      }
+    }
+
+    function validateChatId(chatId) {
+      try {
+        if (typeof chatId !== 'string') return false;
+        // UUID pattern: alphanumeric and hyphens only
+        return /^[0-9a-fA-F-]+$/.test(chatId);
+      } catch (_) {
+        return false;
+      }
     }
 
     // Early boot marker and error hooks
@@ -83,8 +122,9 @@ function buildInjection(baseUrl: string) {
                   if ('value' in node0) { textNow0 = (node0.value||'').trim(); }
                   else { textNow0 = (node0.innerText || node0.textContent || '').trim(); }
                 }
+                textNow0 = sanitizeText(textNow0);
                 try { window.__owui_lastTextCandidate = textNow0; } catch {}
-                if (textNow0 && cid) {
+                if (textNow0 && cid && validateChatId(cid)) {
                   post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'enter', chatId: cid, len: textNow0.length });
                   post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow0 } });
                   // Clear input to reflect queued state
@@ -106,6 +146,7 @@ function buildInjection(baseUrl: string) {
                 if ('value' in node) { textNow = (node.value||'').trim(); }
                 else { textNow = (node.innerText || node.textContent || '').trim(); }
               }
+              textNow = sanitizeText(textNow);
               try { window.__owui_lastTextCandidate = textNow; } catch {}
               post({ type: 'debug', scope: 'injection', event: 'composeEnter', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
               // Fallback: if offline and no completion fetch follows shortly, queue from DOM
@@ -115,13 +156,13 @@ function buildInjection(baseUrl: string) {
                   var offline = (window.__owui_wasOffline === true) || (rnVal === false);
                   if (!offline) return;
                   if ((window.__owui_lastCompletionTick||0) > startTick) return;
-                  var text = String(window.__owui_lastTextCandidate||'').trim();
-                  if (text && cid) {
+                  var text = sanitizeText(String(window.__owui_lastTextCandidate||'').trim());
+                  if (text && cid && validateChatId(cid)) {
                     post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
                     post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
                   }
                 } catch {}
-              }, 1200);
+              }, ${WEBVIEW_LOAD_TIMEOUT});
             }
           }
         } catch {}
@@ -146,8 +187,9 @@ function buildInjection(baseUrl: string) {
             if ('value' in nodeS) { textNowS = (nodeS.value||'').trim(); }
             else { textNowS = (nodeS.innerText || nodeS.textContent || '').trim(); }
           }
+          textNowS = sanitizeText(textNowS);
           try { window.__owui_lastTextCandidate = textNowS; } catch {}
-          if (textNowS && cid) {
+          if (textNowS && cid && validateChatId(cid)) {
             post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'submit', chatId: cid, len: textNowS.length });
             post({ type: 'queueMessage', chatId: cid, body: { uiText: textNowS } });
             try {
@@ -179,8 +221,9 @@ function buildInjection(baseUrl: string) {
               if ('value' in node1) { textNow1 = (node1.value||'').trim(); }
               else { textNow1 = (node1.innerText || node1.textContent || '').trim(); }
             }
+            textNow1 = sanitizeText(textNow1);
             try { window.__owui_lastTextCandidate = textNow1; } catch {}
-            if (textNow1 && cid) {
+            if (textNow1 && cid && validateChatId(cid)) {
               post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'clickSend', chatId: cid, len: textNow1.length });
               post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow1 } });
               // Clear input to reflect queued state
@@ -202,6 +245,7 @@ function buildInjection(baseUrl: string) {
             if ('value' in node) { textNow = (node.value||'').trim(); }
             else { textNow = (node.innerText || node.textContent || '').trim(); }
           }
+          textNow = sanitizeText(textNow);
           try { window.__owui_lastTextCandidate = textNow; } catch {}
           post({ type: 'debug', scope: 'injection', event: 'buttonClickSend', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
           // Fallback: if offline and no completion fetch follows shortly, queue from DOM
@@ -211,13 +255,13 @@ function buildInjection(baseUrl: string) {
               var offline = (window.__owui_wasOffline === true) || (rnVal === false);
               if (!offline) return;
               if ((window.__owui_lastCompletionTick||0) > startTick) return;
-              var text = String(window.__owui_lastTextCandidate||'').trim();
-              if (text && cid) {
+              var text = sanitizeText(String(window.__owui_lastTextCandidate||'').trim());
+              if (text && cid && validateChatId(cid)) {
                 post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
                 post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
               }
             } catch {}
-          }, 1200);
+          }, ${WEBVIEW_LOAD_TIMEOUT});
         } catch {}
       }, true);
     } catch {}
@@ -230,7 +274,10 @@ function buildInjection(baseUrl: string) {
     }
 
     function checkAuthOnce() {
-      if (sentAuth) return;
+      if (sentAuth) {
+        if (window.__owui_authPoll) { clearInterval(window.__owui_authPoll); window.__owui_authPoll = null; }
+        return;
+      }
       // Try common cookie names used by Auth.js/NextAuth and a generic session-token fallback
       const names = [
         'authjs.session-token',
@@ -255,7 +302,12 @@ function buildInjection(baseUrl: string) {
           }
         } catch (_) {}
       }
-      if (t) { sentAuth = true; post({ type: 'authToken', token: t }); post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' }); }
+      if (t) { 
+        sentAuth = true; 
+        post({ type: 'authToken', token: t }); 
+        post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' }); 
+        if (window.__owui_authPoll) { clearInterval(window.__owui_authPoll); window.__owui_authPoll = null; }
+      }
     }
 
     // Register Service Worker for offline shell + API cache (served at origin /sw.js)
@@ -316,7 +368,7 @@ function buildInjection(baseUrl: string) {
           if (hasSW) {
             try {
               // Wait a bit for SW to be ready, then test functionality
-              await new Promise(r => setTimeout(r, 1000));
+              await new Promise(r => setTimeout(r, ${SW_READY_WAIT}));
               const testRes = await fetch('/sw.js', { 
                 method: 'GET', 
                 cache: 'no-store',
@@ -365,8 +417,22 @@ function buildInjection(baseUrl: string) {
     }
 
     checkAuthOnce();
-    const authPoll = setInterval(checkAuthOnce, 3000);
+    if (!sentAuth) {
+      window.__owui_authPoll = setInterval(checkAuthOnce, ${AUTH_POLLING_INTERVAL});
+      // Prevent infinite polling
+      setTimeout(() => {
+        if (window.__owui_authPoll) {
+          clearInterval(window.__owui_authPoll);
+          window.__owui_authPoll = null;
+          post({ type: 'debug', scope: 'injection', event: 'authPollingTimeout' });
+        }
+      }, ${AUTH_CAPTURE_TIMEOUT});
+    }
+    
     try { post({ type: 'debug', scope: 'injection', event: 'injected' }); } catch {}
+
+    // ... existing injection code ...
+
 
     // Capture Authorization from XMLHttpRequest as well (e.g., axios)
     try {
@@ -441,7 +507,7 @@ function buildInjection(baseUrl: string) {
             const i = parts.indexOf('c');
             if (i >= 0 && parts[i+1]) chatId = parts[i+1];
           } catch {}
-          if (!navigator.onLine && bodyParsed && chatId) {
+          if (!navigator.onLine && bodyParsed && chatId && validateChatId(chatId)) {
             try { post({ type: 'debug', scope: 'injection', event: 'queueCandidate', chatId, bodyKeys: Object.keys(bodyParsed || {}), online: !!navigator.onLine }); } catch {}
             post({ type: 'queueMessage', chatId, body: bodyParsed });
           }
@@ -464,7 +530,7 @@ function buildInjection(baseUrl: string) {
               const i = parts.indexOf('c');
               if (i >= 0 && parts[i+1]) chatId = parts[i+1];
             } catch {}
-            if (bodyParsed && chatId) {
+            if (bodyParsed && chatId && validateChatId(chatId)) {
               try { post({ type: 'debug', scope: 'injection', event: 'queueOnError', chatId, bodyKeys: Object.keys(bodyParsed || {}), error: String(err && err.message || err) }); } catch {}
               post({ type: 'queueMessage', chatId, body: bodyParsed });
             }
@@ -630,12 +696,30 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   // Inject one batch of webview-assisted drain using page cookies (fallback when no native token)
   const injectWebDrainBatch = useCallback(async () => {
     try {
-      const host = new URL(baseUrlRef.current).host;
+      const host = safeGetHost(baseUrlRef.current);
+      if (!host) return;
       const items = await listOutbox(host);
       if (!items.length) { drainingRef.current = false; return; }
       const batch = items.slice(0, 3).map((it) => ({ id: it.id, chatId: it.chatId, body: it.body }));
       logInfo('webviewDrain', 'sending batch', { size: batch.length });
       const js = `(() => { (async function(){
+        function findInput() {
+          const selectors = ['textarea', '[contenteditable="true"]', '[role="textbox"]', '#chat-input'];
+          for (var i=0; i<selectors.length; i++) {
+            var el = document.querySelector(selectors[i]);
+            if (el) return el;
+          }
+          return null;
+        }
+        function findBtn() {
+          var btn = document.querySelector('#send-message-button') || 
+                    document.querySelector('button[type="submit"]') || 
+                    document.querySelector('button[data-testid*="send" i]');
+          if (btn) return btn;
+          var buttons = Array.from(document.querySelectorAll('button'));
+          return buttons.find(function(b){ return /send/i.test(b.textContent||''); }) || buttons[buttons.length-1];
+        }
+
         try {
           const items = ${JSON.stringify(batch)};
           const okIds = [];
@@ -644,33 +728,28 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
               if (it && it.body && it.body.uiText) {
                 // UI-driven send using page cookies and app JS
                 const before = (window.__owui_lastCompletionTick||0);
-                // Insert text into input
                 let text = String(it.body.uiText||'');
-                let ta = document.querySelector('textarea');
-                if (ta) {
-                  ta.value = text;
-                  try { ta.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
-                } else {
-                  let ce = document.querySelector('[contenteditable="true"]');
-                  if (ce) {
-                    ce.innerText = text;
-                    try { ce.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch {}
+                let node = findInput();
+                if (node) {
+                  if ('value' in node) {
+                    node.value = text;
+                    try { node.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+                  } else {
+                    node.innerText = text;
+                    try { node.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_) {}
                   }
                 }
-                // Click send button heuristics
+                
+                let btn = findBtn();
                 let clicked = false;
-                let btn = document.querySelector('button[type="submit"], button[data-testid*="send" i]');
-                if (!btn) {
-                  const buttons = Array.from(document.querySelectorAll('button'));
-                  btn = buttons.find(b => /send/i.test(b.textContent||'')) || buttons[buttons.length-1];
-                }
                 if (btn) {
-                  try { btn.click(); clicked = true; } catch {}
+                  try { btn.click(); clicked = true; } catch(_) {}
                 }
-                // Wait up to 8s for completion fetch success tick
+                
+                // Wait for completion fetch success tick
                 let ok = false;
-                for (let i=0;i<32;i++) {
-                  await new Promise(r=>setTimeout(r,250));
+                for (let i=0; i<${Math.ceil(WEBVIEW_DRAIN_TIMEOUT / WEBVIEW_DRAIN_CHECK_INTERVAL)}; i++) {
+                  await new Promise(r=>setTimeout(r, ${WEBVIEW_DRAIN_CHECK_INTERVAL}));
                   if ((window.__owui_lastCompletionTick||0) > before) { ok = true; break; }
                 }
                 if (clicked && ok) {
@@ -706,7 +785,8 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   // WebView-assisted full sync for when cookies exist but native token is not available (httpOnly)
   const injectWebSync = useCallback(async () => {
     try {
-      const host = new URL(baseUrlRef.current).host;
+      const host = safeGetHost(baseUrlRef.current);
+      if (!host) return;
       const { limitConversations, rps } = await getSettings(host);
       const minInterval = Math.max(0, Math.floor(1000 / Math.max(1, rps)));
       const js = `(() => { (async () => {
@@ -769,7 +849,8 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   const onMessage = useCallback(async (e: WebViewMessageEvent) => {
     try {
       const msg = JSON.parse(e.nativeEvent.data || '{}');
-      const host = new URL(baseUrl).host;
+      const host = safeGetHost(baseUrl);
+      if (!host) return;
       if (msg.type === 'debug') {
         logDebug('webview', 'debug', msg);
         try {
@@ -821,7 +902,7 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
                     }
                   }
                 } catch {}
-              }, 3000);
+              }, SW_DETECTION_DELAY);
             }
             return;
           }
@@ -1028,7 +1109,8 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
   React.useEffect(() => {
     (async () => {
       if (!online) return;
-      const host = new URL(baseUrl).host;
+      const host = safeGetHost(baseUrl);
+      if (!host) return;
       const [c, token] = [await count(host), await getToken(host)];
       if (c > 0 && !token && !drainingRef.current) {
         drainingRef.current = true;
@@ -1047,6 +1129,23 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       injectThemeProbe();
     } catch {}
   }, [injected, injectThemeProbe]);
+
+  // Cleanup WebView intervals on unmount
+  React.useEffect(() => {
+    return () => {
+      try {
+        logDebug('webview', 'unmount cleanup');
+        webref.current?.injectJavaScript(`
+          (function(){
+            if (window.__owui_authPoll) {
+              clearInterval(window.__owui_authPoll);
+              window.__owui_authPoll = null;
+            }
+          })();
+        `);
+      } catch {}
+    };
+  }, []);
 
   return (
     <WebView
@@ -1132,8 +1231,9 @@ export default function OpenWebUIView({ baseUrl, online, onQueueCountChange }: {
       onMessage={onMessage}
       onShouldStartLoadWithRequest={(req) => {
         try {
-          const base = new URL(baseUrl);
-          const current = new URL(req.url);
+          const base = safeParseUrl(baseUrl);
+          const current = safeParseUrl(req.url);
+          if (!base || !current) return true;
           if (current.host !== base.host) {
             WebBrowser.openBrowserAsync(req.url);
             return false;

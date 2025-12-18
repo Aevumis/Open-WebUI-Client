@@ -11,8 +11,9 @@ import { drain, getSettings, count } from "../lib/outbox";
 import { debug as logDebug, info as logInfo } from "../lib/log";
 import Toast from "react-native-toast-message";
 import * as Haptics from "expo-haptics";
-
-const STORAGE_KEY = "servers:list";
+import { SYNC_INTERVAL } from "../lib/constants";
+import { safeGetHost } from "../lib/url-utils";
+import { STORAGE_KEYS } from "../lib/storage-keys";
 
 export default function ClientScreen() {
   const params = useLocalSearchParams<{ id: string }>();
@@ -53,7 +54,7 @@ export default function ClientScreen() {
 
   useEffect(() => {
     (async () => {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY);
+      const raw = await AsyncStorage.getItem(STORAGE_KEYS.SERVERS_LIST);
       const list: { id: string; url: string; label?: string }[] = raw ? JSON.parse(raw) : [];
       const s = list.find(x => x.id === params.id);
       if (!s) {
@@ -71,8 +72,11 @@ export default function ClientScreen() {
     (async () => {
       try {
         if (!url) return;
-        const c = await count(new URL(url).host);
-        setQueuedCount(c);
+        const host = safeGetHost(url);
+        if (host) {
+          const c = await count(host);
+          setQueuedCount(c);
+        }
       } catch {}
     })();
   }, [url]);
@@ -87,30 +91,32 @@ export default function ClientScreen() {
       if (running) return;
       running = true;
       try {
-        const host = new URL(url).host;
-        const settings = await getSettings(host);
-        if (settings.fullSyncOnLoad) {
-          const done = await isFullSyncDone(url);
-          if (done) {
-            setSyncStatus('done');
-          } else {
-            setSyncStatus('syncing');
-            logInfo('sync', 'maybeFullSync start');
-            const res = await maybeFullSync(url);
-            if (res) {
-              logInfo('sync', 'fullSync result', res);
+        const host = safeGetHost(url);
+        if (host) {
+          const settings = await getSettings(host);
+          if (settings.fullSyncOnLoad) {
+            const done = await isFullSyncDone(url);
+            if (done) {
               setSyncStatus('done');
-              try {
-                const idx = await getCacheIndex();
-                const count = idx.filter(it => it.host === host).length;
-                logInfo('cache', 'index count for host', { host, count });
-              } catch {}
+            } else {
+              setSyncStatus('syncing');
+              logInfo('sync', 'maybeFullSync start');
+              const res = await maybeFullSync(url);
+              if (res) {
+                logInfo('sync', 'fullSync result', res);
+                setSyncStatus('done');
+                try {
+                  const idx = await getCacheIndex();
+                  const count = idx.filter(it => it.host === host).length;
+                  logInfo('cache', 'index count for host', { host, count });
+                } catch {}
+              }
+              logInfo('sync', 'maybeFullSync done');
             }
-            logInfo('sync', 'maybeFullSync done');
+          } else {
+            setSyncStatus('disabled');
+            logInfo('sync', 'fullSyncOnLoad disabled, skip maybeFullSync');
           }
-        } else {
-          setSyncStatus('disabled');
-          logInfo('sync', 'fullSyncOnLoad disabled, skip maybeFullSync');
         }
       } catch {}
       try {
@@ -132,9 +138,16 @@ export default function ClientScreen() {
     attempt();
     // Retry every 5s until full sync done
     const timer = setInterval(async () => {
-      if (cancelled) return;
+      if (cancelled) {
+        clearInterval(timer);
+        return;
+      }
       try {
-        const host = new URL(url).host;
+        const host = safeGetHost(url);
+        if (!host) {
+          clearInterval(timer);
+          return;
+        }
         const settings = await getSettings(host);
         if (!settings.fullSyncOnLoad) {
           logInfo('sync', 'fullSyncOnLoad disabled, stop retries');
@@ -150,7 +163,7 @@ export default function ClientScreen() {
         }
       } catch {}
       await attempt();
-    }, 5000);
+    }, SYNC_INTERVAL);
 
     return () => { cancelled = true; clearInterval(timer); };
   }, [url, isOnline]);

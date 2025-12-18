@@ -2,6 +2,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { cacheApiResponse } from "./cache";
 import { getSettings, getToken } from "./outbox";
 import { debug as logDebug, info as logInfo } from "./log";
+import { TOKEN_AVAILABILITY_WAIT, SYNC_LOOKBACK_MS } from "./constants";
+import { safeGetHost } from "./url-utils";
 
 const SYNC_DONE = (host: string) => `sync:done:${host}`;
 const LAST_SYNC_TIME = (host: string) => `sync:lastTime:${host}`;
@@ -11,10 +13,10 @@ async function fetchJSON(url: string, token: string) {
   const res = await fetch(url, {
     headers: {
       accept: "application/json",
+      // Use Bearer token authentication only - this is the secure method
+      // Bearer tokens are sent in the Authorization header, not exposed in cookies
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
-      // Fallback for cookie-based auth servers (e.g., authjs.session-token)
-      cookie: `authjs.session-token=${token}; token=${token}`,
     },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -22,7 +24,9 @@ async function fetchJSON(url: string, token: string) {
 }
 
 export async function fullSync(baseUrl: string): Promise<{ conversations: number; messages: number }> {
-  const host = new URL(baseUrl).host;
+  const host = safeGetHost(baseUrl);
+  if (!host) throw new Error("Invalid base URL for fullSync");
+  
   const token = await getToken(host);
   logInfo('sync', 'fullSync start', { host, baseUrl, tokenPresent: !!token });
   if (!token) throw new Error("No auth token captured yet");
@@ -90,12 +94,15 @@ export async function fullSync(baseUrl: string): Promise<{ conversations: number
 }
 
 export async function isFullSyncDone(baseUrl: string) {
-  const host = new URL(baseUrl).host;
+  const host = safeGetHost(baseUrl);
+  if (!host) return false;
   return !!(await AsyncStorage.getItem(SYNC_DONE(host)));
 }
 
 export async function incrementalSync(baseUrl: string): Promise<{ conversations: number; messages: number } | null> {
-  const host = new URL(baseUrl).host;
+  const host = safeGetHost(baseUrl);
+  if (!host) throw new Error("Invalid base URL for incrementalSync");
+  
   const token = await getToken(host);
   logInfo('sync', 'incrementalSync start', { host, baseUrl, tokenPresent: !!token });
   if (!token) throw new Error("No auth token captured yet");
@@ -105,7 +112,7 @@ export async function incrementalSync(baseUrl: string): Promise<{ conversations:
   const minInterval = Math.max(0, Math.floor(1000 / Math.max(1, rps)));
 
   const lastSyncTime = parseInt(await AsyncStorage.getItem(LAST_SYNC_TIME(host)) || '0');
-  const cutoffTime = lastSyncTime || (Date.now() - 7 * 24 * 60 * 60 * 1000); // 7 days ago if no previous sync
+  const cutoffTime = lastSyncTime || (Date.now() - SYNC_LOOKBACK_MS); // 7 days ago if no previous sync
 
   // Fetch conversations, looking for new/updated ones
   let page = 1;
@@ -174,14 +181,17 @@ export async function incrementalSync(baseUrl: string): Promise<{ conversations:
 }
 
 export async function forceSyncReset(baseUrl: string) {
-  const host = new URL(baseUrl).host;
+  const host = safeGetHost(baseUrl);
+  if (!host) return;
   await AsyncStorage.removeItem(SYNC_DONE(host));
   await AsyncStorage.removeItem(LAST_SYNC_TIME(host));
   logInfo('sync', 'force reset sync flags', { host });
 }
 
 export async function manualSync(baseUrl: string, forceFullSync = false): Promise<{ conversations: number; messages: number } | null> {
-  const host = new URL(baseUrl).host;
+  const host = safeGetHost(baseUrl);
+  if (!host) return null;
+  
   const token = await getToken(host);
   if (!token) {
     logInfo('sync', 'manualSync: no token available', { host });
@@ -207,10 +217,12 @@ export async function manualSync(baseUrl: string, forceFullSync = false): Promis
 }
 
 export async function maybeFullSync(baseUrl: string) {
+  const host = safeGetHost(baseUrl);
+  if (!host) return null;
+
   const done = await isFullSyncDone(baseUrl);
   if (done) {
     // If full sync is done, try incremental sync instead
-    const host = new URL(baseUrl).host;
     const token = await getToken(host);
     if (!token) {
       logDebug('sync', 'maybeFullSync: done, but no token for incremental', { host });
@@ -224,12 +236,11 @@ export async function maybeFullSync(baseUrl: string) {
     }
   }
   
-  const host = new URL(baseUrl).host;
   // Wait briefly for token to arrive from WebView if not present yet
   let token = await getToken(host);
   let tries = 0;
   while (!token && tries < 20) { // up to ~5s @250ms
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, TOKEN_AVAILABILITY_WAIT));
     token = await getToken(host);
     tries++;
   }
