@@ -5,7 +5,6 @@ import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { Camera } from "expo-camera";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
 import Toast from "react-native-toast-message";
 
@@ -32,951 +31,25 @@ import {
 import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getErrorMessage } from "../lib/error-utils";
+import { getStorageJSON, setStorageJSON, removeStorageItem } from "../lib/storage-utils";
 import { WebViewMessage, ChatCompletionBody, ConversationData } from "../lib/types";
+import {
+  buildInjection,
+  buildThemeBootstrap,
+  buildDrainBatchJS,
+  buildSyncJS,
+  buildConnectivityJS,
+  buildThemeProbeJS,
+  buildApplyColorSchemeJS,
+  buildCleanupJS,
+} from "../lib/webview-scripts";
+import { useWebViewHandlers } from "../hooks/useWebViewHandlers";
 
 type WebViewPermissionRequest = {
   resources: string[];
   grant: (resources: string[]) => void;
   deny: () => void;
 };
-
-function buildInjectionBoilerplate(allowedHost: string) {
-  return `
-    try {
-      if (window.__owui_injected) {
-        try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'debug', scope: 'injection', event: 'alreadyInjected' })); } catch (_) {}
-        return;
-      }
-      window.__owui_injected = true;
-    } catch (_) {}
-    const host = ${allowedHost};
-    let sentAuth = false;
-    // offline + completion tracking
-    window.__owui_wasOffline = false;
-    window.__owui_lastCompletionTick = 0;
-
-    try { (window.ReactNativeWebView||{}).postMessage && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'debug', scope: 'injection', event: 'hostInfo', hostExpected: host, hostActual: window.location.host })); } catch {}
-
-    function post(msg) {
-      try {
-        var RN = (window && window.ReactNativeWebView) ? window.ReactNativeWebView : null;
-        if (RN && RN.postMessage) RN.postMessage(JSON.stringify(msg));
-      } catch (_) {}
-    }
-
-    // Sanitization functions to prevent XSS vulnerabilities
-    function sanitizeText(text) {
-      try {
-        if (typeof text !== 'string') {
-          text = String(text || '');
-        }
-        // Limit to 50,000 characters
-        if (text.length > 50000) {
-          text = text.substring(0, 50000);
-        }
-        // Remove null bytes and control characters (except common whitespace)
-        text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-        return text;
-      } catch (_) {
-        return '';
-      }
-    }
-
-    function validateChatId(chatId) {
-      try {
-        if (typeof chatId !== 'string') return false;
-        // UUID pattern: alphanumeric and hyphens only
-        return /^[0-9a-fA-F-]+$/.test(chatId);
-      } catch (_) {
-        return false;
-      }
-    }
-  `;
-}
-
-function buildInjectionErrorHooks() {
-  return `
-    // Early boot marker and error hooks
-    try { post({ type: 'debug', scope: 'injection', event: 'boot' }); } catch {}
-    try {
-      window.addEventListener('error', function(e) {
-        try { post({ type: 'debug', scope: 'injection', event: 'error', message: String((e && e.message) || (e && e.error) || 'unknown') }); } catch {}
-      });
-      window.addEventListener('unhandledrejection', function(e) {
-        try { post({ type: 'debug', scope: 'injection', event: 'unhandledrejection', reason: String(e && (e.reason && e.reason.message) || e && e.reason || 'unknown') }); } catch {}
-      });
-      // Patch navigator.onLine early so apps that gate on it still attempt fetch when device is offline
-      try {
-        var nproto = Object.getPrototypeOf(navigator);
-        var desc = Object.getOwnPropertyDescriptor(nproto, 'onLine');
-        if (desc && desc.configurable && !nproto.__owui_onLine_patched) {
-          Object.defineProperty(nproto, 'onLine', { configurable: true, get: function(){ return true; } });
-          nproto.__owui_onLine_patched = true;
-          post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatchedEarly', ok: true });
-        }
-      } catch (epe) { try { post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatchedEarly', ok: false, message: String(epe && epe.message || epe) }); } catch(_){} }
-      // Browser network state visibility
-      window.addEventListener('online', function(){ try { window.__owui_wasOffline = false; post({ type: 'debug', scope: 'injection', event: 'browserNetwork', online: true }); } catch {} });
-      window.addEventListener('offline', function(){ try { window.__owui_wasOffline = true; post({ type: 'debug', scope: 'injection', event: 'browserNetwork', online: false }); } catch {} });
-    } catch (_) {}
-  `;
-}
-
-function buildInjectionDomInterception() {
-  return `
-      // User interaction hints while offline test
-      document.addEventListener('keydown', function(e){
-        try {
-          if (e && (e.key === 'Enter' || e.keyCode === 13)) {
-            var tag = (e.target && e.target.tagName || '').toLowerCase();
-            if (tag === 'textarea' || tag === 'input') {
-              var parts = (window.location.pathname || '').split('/').filter(Boolean);
-              var idx = parts.indexOf('c');
-              var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
-              // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
-              var rnVal0 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-              var offline0 = (window.__owui_wasOffline === true) || (rnVal0 === false);
-              if (offline0 && !e.shiftKey) {
-                var textNow0 = '';
-                var node0 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-                if (node0) {
-                  if ('value' in node0) { textNow0 = (node0.value||'').trim(); }
-                  else { textNow0 = (node0.innerText || node0.textContent || '').trim(); }
-                }
-                textNow0 = sanitizeText(textNow0);
-                try { window.__owui_lastTextCandidate = textNow0; } catch {}
-                if (textNow0 && cid && validateChatId(cid)) {
-                  post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'enter', chatId: cid, len: textNow0.length });
-                  post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow0 } });
-                  // Clear input to reflect queued state
-                  try {
-                    if (node0) {
-                      if ('value' in node0) { node0.value = ''; try { node0.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
-                      else { node0.innerText = ''; try { node0.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
-                    }
-                  } catch {}
-                }
-                try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
-                return;
-              }
-              var startTick = Date.now();
-              // capture candidate text immediately
-              var textNow = '';
-              var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-              if (node) {
-                if ('value' in node) { textNow = (node.value||'').trim(); }
-                else { textNow = (node.innerText || node.textContent || '').trim(); }
-              }
-              textNow = sanitizeText(textNow);
-              try { window.__owui_lastTextCandidate = textNow; } catch {}
-              post({ type: 'debug', scope: 'injection', event: 'composeEnter', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
-              // Fallback: if offline and no completion fetch follows shortly, queue from DOM
-              setTimeout(function(){
-                try {
-                  var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-                  var offline = (window.__owui_wasOffline === true) || (rnVal === false);
-                  if (!offline) return;
-                  if ((window.__owui_lastCompletionTick||0) > startTick) return;
-                  var text = sanitizeText(String(window.__owui_lastTextCandidate||'').trim());
-                  if (text && cid && validateChatId(cid)) {
-                    post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
-                    post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
-                  }
-                } catch {}
-              }, ${WEBVIEW_LOAD_TIMEOUT});
-            }
-          }
-        } catch {}
-      }, true);
-      // Backup: intercept form submit within the compose container (contains #chat-input)
-      document.addEventListener('submit', function(e){
-        try {
-          var tgt = e && e.target;
-          var form = (tgt && (tgt.tagName === 'FORM' ? tgt : (tgt.closest ? tgt.closest('form') : null))) || null;
-          if (!form) { return; }
-          var hasChatInput = !!(form && form.querySelector && form.querySelector('#chat-input'));
-          if (!hasChatInput) { return; }
-          var parts = (window.location.pathname || '').split('/').filter(Boolean);
-          var idx = parts.indexOf('c');
-          var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
-          var rnValS = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-          var offlineS = (window.__owui_wasOffline === true) || (rnValS === false);
-          if (!offlineS) { return; }
-          var textNowS = '';
-          var nodeS = form.querySelector('textarea, [contenteditable="true"], [role="textbox"]') || document.querySelector('#chat-input') || document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-          if (nodeS) {
-            if ('value' in nodeS) { textNowS = (nodeS.value||'').trim(); }
-            else { textNowS = (nodeS.innerText || nodeS.textContent || '').trim(); }
-          }
-          textNowS = sanitizeText(textNowS);
-          try { window.__owui_lastTextCandidate = textNowS; } catch {}
-          if (textNowS && cid && validateChatId(cid)) {
-            post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'submit', chatId: cid, len: textNowS.length });
-            post({ type: 'queueMessage', chatId: cid, body: { uiText: textNowS } });
-            try {
-              if (nodeS) {
-                if ('value' in nodeS) { nodeS.value = ''; try { nodeS.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
-                else { nodeS.innerText = ''; try { nodeS.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
-              }
-            } catch {}
-          }
-          try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
-          return;
-        } catch {} 
-      }, true);
-      document.addEventListener('click', function(e){
-        try {
-          // Only handle clicks on the explicit Send button to avoid blocking other buttons when offline
-          var sendBtn = e && e.target && (e.target.closest ? e.target.closest('#send-message-button') : null);
-          if (!sendBtn) { return; }
-          var parts = (window.location.pathname || '').split('/').filter(Boolean);
-          var idx = parts.indexOf('c');
-          var cid = (idx >= 0 && parts[idx+1]) ? parts[idx+1] : null;
-          // If offline, intercept and queue immediately to avoid UI placeholder/duplicate
-          var rnVal1 = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-          var offline1 = (window.__owui_wasOffline === true) || (rnVal1 === false);
-          if (offline1) {
-            var textNow1 = '';
-            var node1 = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-            if (node1) {
-              if ('value' in node1) { textNow1 = (node1.value||'').trim(); }
-              else { textNow1 = (node1.innerText || node1.textContent || '').trim(); }
-            }
-            textNow1 = sanitizeText(textNow1);
-            try { window.__owui_lastTextCandidate = textNow1; } catch {}
-            if (textNow1 && cid && validateChatId(cid)) {
-              post({ type: 'debug', scope: 'injection', event: 'offlineIntercepted', how: 'clickSend', chatId: cid, len: textNow1.length });
-              post({ type: 'queueMessage', chatId: cid, body: { uiText: textNow1 } });
-              // Clear input to reflect queued state
-              try {
-                if (node1) {
-                  if ('value' in node1) { node1.value = ''; try { node1.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){} }
-                  else { node1.innerText = ''; try { node1.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_){} }
-                }
-              } catch {}
-            }
-            try { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
-            return;
-          }
-          var startTick = Date.now();
-          // capture candidate text immediately
-          var textNow = '';
-          var node = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
-          if (node) {
-            if ('value' in node) { textNow = (node.value||'').trim(); }
-            else { textNow = (node.innerText || node.textContent || '').trim(); }
-          }
-          textNow = sanitizeText(textNow);
-          try { window.__owui_lastTextCandidate = textNow; } catch {}
-          post({ type: 'debug', scope: 'injection', event: 'buttonClickSend', chatId: cid, online: !!navigator.onLine, len: (textNow||'').length });
-          // Fallback: if offline and no completion fetch follows shortly, queue from DOM
-          setTimeout(function(){
-            try {
-              var rnVal = (typeof window.__owui_rnOnline !== 'undefined') ? !!window.__owui_rnOnline : null;
-              var offline = (window.__owui_wasOffline === true) || (rnVal === false);
-              if (!offline) return;
-              if ((window.__owui_lastCompletionTick||0) > startTick) return;
-              var text = sanitizeText(String(window.__owui_lastTextCandidate||'').trim());
-                                if (text && cid && validateChatId(cid)) {
-                                  post({ type: 'debug', scope: 'injection', event: 'queueFromDom', chatId: cid, len: text.length });
-                                  post({ type: 'queueMessage', chatId: cid, body: { uiText: text } });
-                                }
-                              } catch {}
-                            }, ${WEBVIEW_LOAD_TIMEOUT});
-                      } catch {}
-                    }, true);
-                `;
-}
-function buildInjectionAuthCapture() {
-  return `
-    function getCookie(name) {
-      try {
-        const m = (document.cookie || '').match(new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()\[\]\\\/\+^])/g, '\\$1') + '=([^;]*)'));
-        return m ? decodeURIComponent(m[1]) : null;
-      } catch (_) { return null; }
-    }
-
-    function checkAuthOnce() {
-      if (sentAuth) {
-        if (window.__owui_authPoll) { clearInterval(window.__owui_authPoll); window.__owui_authPoll = null; }
-        return;
-      }
-      // Try common cookie names used by Auth.js/NextAuth and a generic session-token fallback
-      const names = [
-        'authjs.session-token',
-        '__Secure-authjs.session-token',
-        'next-auth.session-token',
-        '__Secure-next-auth.session-token',
-        'token',
-      ];
-      let t = null;
-      for (var i = 0; i < names.length && !t; i++) { t = getCookie(names[i]); }
-      if (!t) {
-        try {
-          var parts = (document.cookie || '').split(';');
-          for (var j = 0; j < parts.length && !t; j++) {
-            var kv = parts[j].trim();
-            var eq = kv.indexOf('=');
-            if (eq > 0) {
-              var k = kv.slice(0, eq);
-              var v = decodeURIComponent(kv.slice(eq + 1));
-              if (/session-token$/i.test(k)) { t = v; break; }
-            }
-          }
-        } catch (_) {}
-      }
-      if (t) {
-        sentAuth = true;
-        post({ type: 'authToken', token: t });
-        post({ type: 'debug', scope: 'injection', event: 'authCookieCaptured' });
-        if (window.__owui_authPoll) { clearInterval(window.__owui_authPoll); window.__owui_authPoll = null; }
-      }
-    }
-
-        checkAuthOnce();
-
-        if (!sentAuth) {
-
-          window.__owui_authPoll = setInterval(checkAuthOnce, ${AUTH_POLLING_INTERVAL});
-
-          // Prevent infinite polling
-
-          setTimeout(() => {
-
-            if (window.__owui_authPoll) {
-
-              clearInterval(window.__owui_authPoll);
-
-              window.__owui_authPoll = null;
-
-              post({ type: 'debug', scope: 'injection', event: 'authPollingTimeout' });
-
-            }
-
-          }, ${AUTH_CAPTURE_TIMEOUT});
-
-        }
-
-    
-  `;
-}
-
-function buildInjectionServiceWorker() {
-  return `
-    // Register Service Worker for offline shell + API cache (served at origin /sw.js)
-    if ('serviceWorker' in navigator) {
-      try { navigator.serviceWorker.register('/sw.js', { scope: '/' }); } catch (e) {}
-      // Probe availability and report to native for UX hints - with better timing
-      (async function(){
-        try {
-          // Wait for page to be more ready before testing SW
-          const isPageReady = window.location.host && window.location.host.length > 0;
-          if (!isPageReady) {
-            post({ type: 'debug', scope: 'injection', event: 'swDetectionSkipped', reason: 'pageNotReady', host: window.location.host });
-            return;
-          }
-
-          post({ type: 'debug', scope: 'injection', event: 'swDetectionStart', host: window.location.host });
-
-          let hasSW = false;
-          let method = 'regCheck';
-          let status = null;
-          let swFunctional = false;
-          let error = null;
-
-          try {
-            // First check if SW file exists
-            method = 'head';
-            const res = await fetch('/sw.js', { method: 'HEAD', cache: 'no-store' });
-            status = res && res.status;
-            hasSW = !!(res && res.ok);
-            post({ type: 'debug', scope: 'injection', event: 'swFileCheck', method: 'head', status, hasSW });
-
-            if (!hasSW && (!res || status === 405 || status === 501)) {
-              method = 'get';
-              const res2 = await fetch('/sw.js', { method: 'GET', cache: 'no-store' });
-              status = res2 && res2.status;
-              hasSW = !!(res2 && res2.ok);
-              post({ type: 'debug', scope: 'injection', event: 'swFileCheck', method: 'get', status, hasSW });
-            }
-          } catch (e) {
-            error = String(e && e.message || e);
-            post({ type: 'debug', scope: 'injection', event: 'swFileCheckError', error });
-          }
-
-          // Check registration status
-          if (!hasSW) {
-            try {
-              const reg = await (navigator.serviceWorker.getRegistration ? navigator.serviceWorker.getRegistration() : Promise.resolve(null));
-              const regActive = !!(reg && reg.active);
-              hasSW = regActive;
-              if (hasSW) method = 'registration';
-              post({ type: 'debug', scope: 'injection', event: 'swRegistrationCheck', hasRegistration: !!reg, hasActive: regActive, hasSW });
-            } catch (e) {
-              post({ type: 'debug', scope: 'injection', event: 'swRegistrationError', error: String(e && e.message || e) });
-            }
-          }
-
-          // Test if SW is actually functional (only if we think it exists)
-          if (hasSW) {
-            try {
-              // Wait a bit for SW to be ready, then test functionality
-              await new Promise(r => setTimeout(r, ${SW_READY_WAIT}));
-              const testRes = await fetch('/sw.js', {
-                method: 'GET',
-                cache: 'no-store',
-                headers: { 'x-sw-test': 'functional-check' }
-              });
-              swFunctional = !!(testRes && testRes.ok);
-              post({ type: 'debug', scope: 'injection', event: 'swFunctionalTest', swFunctional, status: testRes && testRes.status });
-            } catch (e) {
-              swFunctional = false;
-              post({ type: 'debug', scope: 'injection', event: 'swFunctionalError', error: String(e && e.message || e) });
-            }
-          }
-
-          post({ type: 'debug', scope: 'injection', event: 'swDetectionComplete', hasSW, swFunctional, method, status, error });
-          try { post({ type: 'swStatus', hasSW, swFunctional, method, status, error }); } catch(_){}
-        } catch (e) {
-          post({ type: 'debug', scope: 'injection', event: 'swDetectionFailed', error: String(e && e.message || e) });
-        }
-      })();
-    }
-    else {
-      try {
-        post({ type: 'debug', scope: 'injection', event: 'swUnsupported' });
-        post({ type: 'swStatus', hasSW: false, method: 'unsupported' });
-      } catch(_){}
-    }
-  `;
-}
-
-function buildInjectionFetchInterception() {
-  return `
-    function shouldCache(url) {
-      try {
-        const u = new URL(url);
-        if (u.host !== host) return false;
-        // Exact conversation endpoint pattern as provided: /api/v1/chats/:id
-        return /^\\/api\\/v1\\/chats\\/[0-9a-fA-F-]+$/.test(u.pathname);
-      } catch (_) {
-        return false;
-      }
-    }
-
-    async function readBlobAsBase64(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(String(reader.result).split(',')[1] || '');
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    }
-
-    // Capture Authorization from XMLHttpRequest as well (e.g., axios)
-    try {
-      const XHR = window.XMLHttpRequest;
-      if (XHR && XHR.prototype && !XHR.prototype.__owui_patched) {
-        const origSetHeader = XHR.prototype.setRequestHeader;
-        XHR.prototype.setRequestHeader = function(name, value) {
-          try {
-            if (!sentAuth && /authorization/i.test(String(name))) {
-              const m = String(value).match(/Bearer\\s+(.+)/i);
-              if (m && m[1]) { sentAuth = true; post({ type: 'authToken', token: m[1] }); post({ type: 'debug', scope: 'injection', event: 'authXHRHeaderCaptured' }); }
-            }
-          } catch {}
-          return origSetHeader.apply(this, arguments);
-        };
-        // mark patched
-        XHR.prototype.__owui_patched = true;
-      }
-    } catch {}
-
-    const origFetch = window.fetch;
-    window.fetch = async function(input, init) {
-      try {
-        // Force sites that gate on navigator.onLine to attempt fetch even when offline.
-        // This enables our network-failure path below to queue the message body.
-        try {
-          var proto = Object.getPrototypeOf(navigator);
-          var d = Object.getOwnPropertyDescriptor(proto, 'onLine');
-          if (d && d.configurable && !proto.__owui_onLine_patched) {
-            Object.defineProperty(proto, 'onLine', { configurable: true, get: function(){ return true; } });
-            proto.__owui_onLine_patched = true;
-            post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatched', ok: true });
-          }
-        } catch (pe) { try { post({ type: 'debug', scope: 'injection', event: 'forceOnlinePatched', ok: false, message: String(pe && pe.message || pe) }); } catch(_){} }
-
-        // Attempt to capture Authorization header or cookie token before request
-        const hh = new Headers((init && init.headers) || {});
-        const ah = hh.get('authorization') || hh.get('Authorization');
-        if (ah && !sentAuth) {
-          const m = ah.match(/Bearer\\s+(.+)/i);
-          if (m && m[1]) { sentAuth = true; post({ type: 'authToken', token: m[1] }); post({ type: 'debug', scope: 'injection', event: 'authHeaderCaptured' }); }
-        } else if (!sentAuth) {
-          checkAuthOnce();
-        }
-      } catch (_) {}
-
-      // If this is a chat completion POST, optionally queue when offline
-      let targetUrl = typeof input === 'string' ? input : (input && input.url);
-      const isCompletion = (() => {
-        try {
-          const u = new URL(targetUrl, window.location.href);
-          const p = u.pathname;
-          return (p === '/api/chat/completions' || p === '/api/v1/chat/completions') && u.host === host;
-        } catch { return false; }
-      })();
-
-      if (isCompletion) {
-        try {
-          try {
-            const u = new URL(targetUrl, window.location.href);
-            post({ type: 'debug', scope: 'injection', event: 'completionDetected', pathname: u.pathname, online: !!navigator.onLine });
-          } catch {}
-          const bodyRaw = init && init.body;
-          let bodyParsed = null;
-          if (typeof bodyRaw === 'string') {
-            try { bodyParsed = JSON.parse(bodyRaw); } catch {}
-          }
-          // Derive chatId from URL path /c/:id if present
-          let chatId = null;
-          try {
-            const parts = (window.location.pathname || '').split('/').filter(Boolean);
-            const i = parts.indexOf('c');
-            if (i >= 0 && parts[i+1]) chatId = parts[i+1];
-          } catch {}
-          if (!navigator.onLine && bodyParsed && chatId && validateChatId(chatId)) {
-            try { post({ type: 'debug', scope: 'injection', event: 'queueCandidate', chatId, bodyKeys: Object.keys(bodyParsed || {}), online: !!navigator.onLine }); } catch {}
-            post({ type: 'queueMessage', chatId, body: bodyParsed });
-          }
-        } catch (_) {}
-      }
-
-      let res;
-      try {
-        res = await origFetch(input, init);
-      } catch (err) {
-        // Network failure: try queueing
-        if (isCompletion) {
-          try {
-            const bodyRaw = init && init.body;
-            let bodyParsed = null;
-            if (typeof bodyRaw === 'string') { try { bodyParsed = JSON.parse(bodyRaw); } catch {} }
-            let chatId = null;
-            try {
-              const parts = (window.location.pathname || '').split('/').filter(Boolean);
-              const i = parts.indexOf('c');
-              if (i >= 0 && parts[i+1]) chatId = parts[i+1];
-            } catch {}
-            if (bodyParsed && chatId && validateChatId(chatId)) {
-              try { post({ type: 'debug', scope: 'injection', event: 'queueOnError', chatId, bodyKeys: Object.keys(bodyParsed || {}), error: String(err && err.message || err) }); } catch {}
-              post({ type: 'queueMessage', chatId, body: bodyParsed });
-            }
-          } catch {}
-        }
-        throw err;
-      }
-      // Mark success tick for completion sends
-      try {
-        if (isCompletion && res && res.ok) {
-          window.__owui_lastCompletionTick = Date.now();
-          post({ type: 'debug', scope: 'injection', event: 'completionOk' });
-        }
-      } catch (_) {}
-      try {
-        const url = typeof input === 'string' ? input : input.url;
-        const ct = res.headers.get('content-type') || '';
-        if (ct.includes('application/json') && shouldCache(url)) {
-          const clone = res.clone();
-          const data = await clone.json();
-          post({ type: 'cacheResponse', url, data });
-        } else if ((ct.includes('application/octet-stream') || ct.includes('application/pdf') || ct.includes('image/') || ct.includes('zip') || ct.includes('ms-') || ct.includes('officedocument')) && url) {
-          // Likely a download; attempt to capture
-          const disp = res.headers.get('content-disposition') || '';
-          if (/attachment/i.test(disp)) {
-            const clone = res.clone();
-            const blob = await clone.blob();
-            const b64 = await readBlobAsBase64(blob);
-            const nameMatch = /filename\\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disp);
-            const filename = decodeURIComponent(nameMatch?.[1] || nameMatch?.[2] || 'download');
-            post({ type: 'downloadBlob', filename, mime: ct, base64: b64 });
-          }
-        }
-      } catch (e) {}
-      return res;
-    };
-  `;
-}
-
-function buildInjectionExternalLinks() {
-  return `
-    const origOpen = window.open;
-    window.open = function(url, target, features) {
-      try { post({ type: 'externalLink', url }); } catch {}
-      return null;
-    };
-
-    document.addEventListener('click', (e) => {
-      const a = e.target && (e.target.closest ? e.target.closest('a') : null);
-      if (!a) return;
-      const href = a.getAttribute('href');
-      if (!href) return;
-      try {
-        const u = new URL(href, window.location.href);
-        if (u.origin !== window.location.origin) {
-          e.preventDefault();
-          post({ type: 'externalLink', url: u.toString() });
-        }
-      } catch {}
-    }, true);
-  `;
-}
-
-function buildInjection(baseUrl: string) {
-  // Intercept fetch/XHR to capture conversation JSON and downloads; avoid changing behavior of page.
-  // Post messages to React Native with type keys for native handling.
-  const h = safeGetHost(baseUrl);
-  const allowedHost = JSON.stringify(h || "");
-  return `(() => {
-    ${buildInjectionBoilerplate(allowedHost)}
-    ${buildInjectionErrorHooks()}
-    ${buildInjectionDomInterception()}
-    ${buildInjectionAuthCapture()}
-    ${buildInjectionServiceWorker()}
-    ${buildInjectionFetchInterception()}
-    ${buildInjectionExternalLinks()}
-  })();`;
-}
-
-// Document-start theme bootstrap: generic theming without app-specific internals.
-// - Shims matchMedia('(prefers-color-scheme: dark)') to reflect RN scheme
-// - Applies html class 'dark', data-theme attribute, and color-scheme style/meta
-// - Respects explicit user choice in localStorage ('light'|'dark'); only overrides null/system/auto
-// - Exposes window.__owui_notifyThemeChange(isDark) to re-assert later
-function buildThemeBootstrap(scheme: "dark" | "light" | null) {
-  const isDark = scheme === "dark";
-  return `(() => { try {
-    var isDark = ${isDark ? "true" : "false"};
-    try { window.__owui_rnColorScheme = isDark ? 'dark' : 'light'; } catch(_){ }
-    try {
-      var listeners = new Set();
-      var darkMql = {
-        matches: isDark,
-        media: '(prefers-color-scheme: dark)',
-        onchange: null,
-        addListener: function(fn){ try{ listeners.add(fn); }catch(_){ } },
-        removeListener: function(fn){ try{ listeners.delete(fn); }catch(_){ } },
-        addEventListener: function(type, fn){ if(type==='change') this.addListener(fn); },
-        removeEventListener: function(type, fn){ if(type==='change') this.removeListener(fn); }
-      };
-      function dispatchMql(){
-        try {
-          var ev = { matches: darkMql.matches, media: darkMql.media };
-          if (typeof darkMql.onchange === 'function') { try { darkMql.onchange(ev); } catch(_){} }
-          listeners.forEach(function(fn){ try { fn(ev); } catch(_){} });
-        } catch(_){ }
-      }
-      var origMatchMedia = window.matchMedia;
-      function owuiMatchMedia(q){
-        try {
-          if (typeof q === 'string' && /\(prefers-color-scheme:\s*dark\)/i.test(q)) { return darkMql; }
-        } catch(_){ }
-        return origMatchMedia ? origMatchMedia.call(window, q) : { matches: false, media: String(q||''), onchange: null, addListener: function(){}, removeListener: function(){}, addEventListener: function(){}, removeEventListener: function(){} };
-      }
-      try { Object.defineProperty(window, 'matchMedia', { configurable: true, get: function(){ return owuiMatchMedia; } }); } catch(_){ }
-      window.__owui_notifyThemeChange = function(isDarkNow){
-        try {
-          darkMql.matches = !!isDarkNow;
-          try { document && document.documentElement && document.documentElement.classList && document.documentElement.classList.toggle('dark', !!isDarkNow); } catch(_){ }
-          try { document && document.documentElement && document.documentElement.setAttribute && document.documentElement.setAttribute('data-theme', (!!isDarkNow ? 'dark' : 'light')); } catch(_){ }
-          try { document && document.documentElement && document.documentElement.style && (document.documentElement.style.colorScheme = (!!isDarkNow ? 'dark' : 'light')); } catch(_){ }
-          try { var meta = document.querySelector('meta[name="color-scheme"]'); if(!meta){ meta = document.createElement('meta'); meta.setAttribute('name','color-scheme'); (document.head||document.documentElement).appendChild(meta); } meta.setAttribute('content', 'dark light'); } catch(_){ }
-          try {
-            var stored = null; try { stored = localStorage.getItem('theme'); } catch(_){ }
-            if (stored === null || /^(system|auto)$/i.test(String(stored))) {
-              try { localStorage.setItem('theme', (!!isDarkNow ? 'dark' : 'light')); localStorage.setItem('resolvedTheme', (!!isDarkNow ? 'dark' : 'light')); } catch(_){ }
-            }
-          } catch(_){ }
-          try { window && window.dispatchEvent && window.dispatchEvent(new Event('storage')); } catch(_){ }
-          dispatchMql();
-        } catch(_){ }
-      };
-      // Initialize now
-      window.__owui_notifyThemeChange(isDark);
-    } catch(_){ }
-    try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'injection', event:'themeBootstrap' })); } catch(_){ }
-  } catch(_){ } })();`;
-}
-
-function handleDebug(msg: Extract<WebViewMessage, { type: "debug" }>) {
-  logDebug("webview", "debug", msg);
-}
-
-async function handleAuthToken(msg: Extract<WebViewMessage, { type: "authToken" }>, host: string) {
-  if (typeof msg.token === "string") {
-    await setToken(host, msg.token);
-
-    logInfo("outbox", "token saved for host", { host });
-  }
-}
-
-async function handleSyncDone(
-  msg: Extract<WebViewMessage, { type: "syncDone" }>,
-  host: string,
-  syncingRef: React.MutableRefObject<boolean>
-) {
-  try {
-    await AsyncStorage.setItem(STORAGE_KEYS.syncDone(host), String(Date.now()));
-
-    logInfo("sync", "done flag set (webview-assisted)", {
-      host,
-
-      conversations: msg.conversations,
-
-      messages: msg.messages,
-    });
-  } catch (e) {
-    logDebug("webview", "handleSyncDone error", { error: getErrorMessage(e) });
-  }
-
-  syncingRef.current = false;
-}
-
-async function handleQueueMessage(
-  msg: Extract<WebViewMessage, { type: "queueMessage" }> & {
-    chatId?: string;
-    body?: ChatCompletionBody;
-  },
-  host: string,
-  onQueueCountChange?: (count: number) => void
-) {
-  if (msg.chatId && msg.body) {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    await enqueue(host, { id, chatId: msg.chatId, body: msg.body });
-
-    const c = await count(host);
-
-    logInfo("outbox", "enqueued", {
-      chatId: msg.chatId,
-
-      bodyKeys: Object.keys(msg.body || {}),
-
-      count: c,
-    });
-
-    try {
-      try {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-      } catch {}
-
-      Toast.show({ type: "info", text1: "Message queued" });
-    } catch (e) {
-      logDebug("webview", "handleQueueMessage toast error", { error: getErrorMessage(e) });
-    }
-
-    try {
-      onQueueCountChange && onQueueCountChange(c);
-    } catch {}
-  }
-}
-
-async function handleDownloadBlob(msg: Extract<WebViewMessage, { type: "downloadBlob" }>) {
-  if (msg.base64) {
-    const filename = msg.filename || "download";
-
-    const uri = FileSystem.documentDirectory + `downloads/` + filename;
-
-    await FileSystem.makeDirectoryAsync(FileSystem.documentDirectory + "downloads", {
-      intermediates: true,
-    }).catch(() => {});
-
-    await FileSystem.writeAsStringAsync(uri, msg.base64, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-
-    if (Platform.OS === "ios") {
-      await Sharing.shareAsync(uri, { mimeType: msg.mime, dialogTitle: filename });
-    } else {
-      Alert.alert("Downloaded", filename);
-    }
-  }
-}
-
-async function handleSwStatus(
-  msg: Extract<WebViewMessage, { type: "swStatus" }> & {
-    hasSW?: boolean;
-    swFunctional?: boolean;
-    method?: string;
-  },
-  host: string
-) {
-  logInfo("webview", "swStatus", msg);
-  try {
-    const key = STORAGE_KEYS.swHint(host);
-    const pendingKey = STORAGE_KEYS.swHintPending(host);
-    const shownCount = parseInt((await AsyncStorage.getItem(key)) || "0");
-
-    // If this is an "unsupported" detection (early timing issue), delay the warning
-    if (msg.method === "unsupported") {
-      const existingPending = await AsyncStorage.getItem(pendingKey);
-      if (!existingPending) {
-        await AsyncStorage.setItem(pendingKey, String(Date.now()));
-        logInfo("webview", "swUnsupportedPending", { host, delayingWarning: true });
-
-        // Wait 3 seconds, then check if we got a better detection
-        setTimeout(async () => {
-          try {
-            const stillPending = await AsyncStorage.getItem(pendingKey);
-            if (stillPending) {
-              // No better detection came in, show the warning
-              await AsyncStorage.removeItem(pendingKey);
-              const currentCount = parseInt((await AsyncStorage.getItem(key)) || "0");
-              if (currentCount < 2) {
-                await AsyncStorage.setItem(key, String(currentCount + 1));
-                Toast.show({
-                  type: "info",
-                  text1: "Service Worker not supported",
-                  text2: "Your browser may not support Service Workers. Tap to learn more.",
-                  onPress: async () => {
-                    try {
-                      await WebBrowser.openBrowserAsync(
-                        "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
-                      );
-                    } catch {}
-                  },
-                });
-                logInfo("webview", "swDelayedWarningShown", {
-                  host,
-                  method: "unsupported",
-                  shownCount: currentCount + 1,
-                });
-              }
-            }
-          } catch {}
-        }, SW_DETECTION_DELAY);
-      }
-      return;
-    }
-
-    // Clear any pending unsupported warning since we got a real detection
-    await AsyncStorage.removeItem(pendingKey);
-
-    // Only show toast if:
-    // 1. SW file doesn't exist OR SW exists but isn't functional
-    // 2. Haven't shown this warning more than 2 times for this host
-    // 3. Give preference to functional check over file existence
-    const shouldWarn = (!msg.hasSW || (msg.hasSW && msg.swFunctional === false)) && shownCount < 2;
-
-    if (shouldWarn) {
-      await AsyncStorage.setItem(key, String(shownCount + 1));
-      const warningText = !msg.hasSW
-        ? "Service Worker not found on server"
-        : "Service Worker found but not working properly";
-
-      Toast.show({
-        type: "info",
-        text1: "Offline mode not fully enabled",
-        text2: `${warningText}. Tap to learn more.`,
-        onPress: async () => {
-          try {
-            await WebBrowser.openBrowserAsync(
-              "https://github.com/Aevumis/Open-WebUI-Client/tree/main/webui-sw"
-            );
-          } catch {}
-        },
-      });
-
-      logInfo("webview", "swWarningShown", {
-        host,
-        hasSW: msg.hasSW,
-        swFunctional: msg.swFunctional,
-        method: msg.method,
-        shownCount: shownCount + 1,
-      });
-    } else if (msg.hasSW && msg.swFunctional !== false) {
-      // SW appears to be working, clear any previous warning count
-      await AsyncStorage.removeItem(key);
-      logInfo("webview", "swWorking", { host, method: msg.method });
-    }
-  } catch (e) {
-    logDebug("webview", "handleSwStatus error", { error: getErrorMessage(e) });
-  }
-}
-
-async function handleDrainBatchResult(
-  msg: Extract<WebViewMessage, { type: "drainBatchResult" }>,
-  host: string,
-  drainingRef: React.MutableRefObject<boolean>,
-  onQueueCountChange?: (count: number) => void,
-  injectWebDrainBatch?: () => Promise<void>
-) {
-  if (Array.isArray(msg.successIds)) {
-    await removeOutboxItems(host, msg.successIds);
-    const remaining = await count(host);
-    const token = await getToken(host);
-    logInfo("webviewDrain", "batch result", { removed: msg.successIds.length, remaining });
-    try {
-      if (msg.successIds.length > 0) {
-        try {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-        } catch (e) {
-          logDebug("webview", "haptics error", { error: getErrorMessage(e) });
-        }
-        Toast.show({ type: "success", text1: `Sent ${msg.successIds.length} queued` });
-      }
-    } catch (e) {
-      logDebug("webview", "handleDrainBatchResult toast error", { error: getErrorMessage(e) });
-    }
-    try {
-      onQueueCountChange && onQueueCountChange(remaining);
-    } catch (e) {
-      logDebug("webview", "onQueueCountChange error", { error: getErrorMessage(e) });
-    }
-    if (!token && remaining > 0 && injectWebDrainBatch) {
-      await injectWebDrainBatch();
-    } else {
-      drainingRef.current = false;
-    }
-  }
-}
-
-function handleDrainBatchError(
-  msg: Extract<WebViewMessage, { type: "drainBatchError" }>,
-  drainingRef: React.MutableRefObject<boolean>
-) {
-  logInfo("webviewDrain", "batch error", { error: msg.error });
-  drainingRef.current = false;
-}
-
-function handleThemeProbe(msg: Extract<WebViewMessage, { type: "themeProbe" }>) {
-  if (msg.payload) {
-    try {
-      logInfo("theme", "probe", msg.payload);
-    } catch (e) {
-      logDebug("theme", "probe error", { error: getErrorMessage(e) });
-    }
-  }
-}
-
-async function handleExternalLink(msg: Extract<WebViewMessage, { type: "externalLink" }>) {
-  if (typeof msg.url === "string") {
-    await WebBrowser.openBrowserAsync(msg.url);
-  }
-}
-
-async function handleCacheResponse(
-  msg: Extract<WebViewMessage, { type: "cacheResponse" }>,
-  host: string
-) {
-  const entry: CachedEntry = {
-    url: msg.url,
-    capturedAt: Date.now(),
-    data: msg.data as ConversationData,
-  };
-  await cacheApiResponse(host, entry);
-}
 
 export default function OpenWebUIView({
   baseUrl,
@@ -1046,82 +119,7 @@ export default function OpenWebUIView({
         .slice(0, 3)
         .map((it) => ({ id: it.id, chatId: it.chatId, body: it.body }));
       logInfo("webviewDrain", "sending batch", { size: batch.length });
-      const js = `(() => { (async function(){
-        function findInput() {
-          const selectors = ['textarea', '[contenteditable="true"]', '[role="textbox"]', '#chat-input'];
-          for (var i=0; i<selectors.length; i++) {
-            var el = document.querySelector(selectors[i]);
-            if (el) return el;
-          }
-          return null;
-        }
-        function findBtn() {
-          var btn = document.querySelector('#send-message-button') || 
-                    document.querySelector('button[type="submit"]') || 
-                    document.querySelector('button[data-testid*="send" i]');
-          if (btn) return btn;
-          var buttons = Array.from(document.querySelectorAll('button'));
-          return buttons.find(function(b){ return /send/i.test(b.textContent||''); }) || buttons[buttons.length-1];
-        }
-
-        try {
-          const items = ${JSON.stringify(batch)};
-          const okIds = [];
-          for (let it of items) {
-            try {
-              if (it && it.body && it.body.uiText) {
-                // UI-driven send using page cookies and app JS
-                const before = (window.__owui_lastCompletionTick||0);
-                let text = String(it.body.uiText||'');
-                let node = findInput();
-                if (node) {
-                  if ('value' in node) {
-                    node.value = text;
-                    try { node.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
-                  } else {
-                    node.innerText = text;
-                    try { node.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch(_) {}
-                  }
-                }
-                
-                let btn = findBtn();
-                let clicked = false;
-                if (btn) {
-                  try { btn.click(); clicked = true; } catch(_) {}
-                }
-                
-                // Wait for completion fetch success tick
-                let ok = false;
-                for (let i=0; i<${Math.ceil(WEBVIEW_DRAIN_TIMEOUT / WEBVIEW_DRAIN_CHECK_INTERVAL)}; i++) {
-                  await new Promise(r=>setTimeout(r, ${WEBVIEW_DRAIN_CHECK_INTERVAL}));
-                  if ((window.__owui_lastCompletionTick||0) > before) { ok = true; break; }
-                }
-                if (clicked && ok) {
-                  okIds.push(it.id);
-                } else {
-                  break;
-                }
-              } else {
-                const res = await fetch('/api/chat/completions', {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json', 'referer': '/c/' + it.chatId },
-                  body: JSON.stringify(it.body)
-                });
-                if (res && res.ok) {
-                  okIds.push(it.id);
-                } else {
-                  break;
-                }
-              }
-            } catch (e) {
-              break;
-            }
-          }
-          window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'drainBatchResult', successIds: okIds }));
-        } catch (e) {
-          try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'drainBatchError', error: getErrorMessage(e) })); } catch (_) {}
-        }
-      })(); })();`;
+      const js = buildDrainBatchJS(batch, WEBVIEW_DRAIN_TIMEOUT, WEBVIEW_DRAIN_CHECK_INTERVAL);
       webref.current?.injectJavaScript(js);
     } catch (e) {
       logDebug("webviewDrain", "inject error", { error: getErrorMessage(e) });
@@ -1131,62 +129,7 @@ export default function OpenWebUIView({
   // WebView-assisted full sync for when cookies exist but native token is not available (httpOnly)
   const injectWebSync = useCallback(async () => {
     try {
-      const host = safeGetHost(baseUrlRef.current);
-      if (!host) return;
-      const { limitConversations, rps } = await getSettings(host);
-      const minInterval = Math.max(0, Math.floor(1000 / Math.max(1, rps)));
-      const js = `(() => { (async () => {
-        function post(m){ try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(m)); } catch(_){} }
-        try {
-          if (window.__owui_syncing) { post({ type: 'debug', scope: 'injection', event: 'syncSkipAlreadyRunning' }); return; }
-          window.__owui_syncing = true;
-          post({ type: 'debug', scope: 'injection', event: 'syncStart' });
-          const LIMIT = ${limitConversations};
-          const MIN = ${minInterval};
-          let page = 1;
-          const chats = [];
-          for (;;) {
-            const res = await fetch('/api/v1/chats/?page=' + page, { headers: { accept: 'application/json' }, credentials: 'include' });
-            if (!res || !res.ok) break;
-            const data = await res.json();
-            if (!Array.isArray(data) || data.length === 0) break;
-            for (let i=0;i<data.length;i++) {
-              const it = data[i];
-              chats.push({ id: it.id, title: it.title });
-              if (chats.length >= LIMIT) break;
-            }
-            if (chats.length >= LIMIT) break;
-            if (MIN) { await new Promise(r=>setTimeout(r, MIN)); }
-            page += 1;
-          }
-          let messages = 0;
-          for (let i=0;i<chats.length;i++) {
-            const c = chats[i];
-            const url = '/api/v1/chats/' + c.id;
-            try {
-              const res = await fetch(url, { headers: { accept: 'application/json' }, credentials: 'include' });
-              if (res && res.ok) {
-                const data = await res.json();
-                if (data && data.archived === true) {
-                  // skip archived
-                } else {
-                  try { post({ type: 'cacheResponse', url: (location.origin + url), data }); } catch(_){ }
-                  try {
-                    const mcount = Array.isArray(data && data.chat && data.chat.messages) ? data.chat.messages.length : (Array.isArray(data && data.messages) ? data.messages.length : 0);
-                    messages += (mcount || 0);
-                  } catch(_){}
-                }
-              }
-            } catch(_){}
-            if (MIN) { await new Promise(r=>setTimeout(r, MIN)); }
-          }
-          post({ type: 'syncDone', conversations: chats.length, messages });
-        } catch (e) {
-          try { post({ type: 'debug', scope: 'injection', event: 'syncError', message: getErrorMessage(e) }); } catch(_){}
-        } finally {
-          try { window.__owui_syncing = false; } catch(_){ }
-        }
-      })(); })();`;
+      const js = buildSyncJS();
       syncingRef.current = true;
       webref.current?.injectJavaScript(js);
     } catch (e) {
@@ -1194,17 +137,25 @@ export default function OpenWebUIView({
     }
   }, []);
 
+  const handlers = useWebViewHandlers({
+    host: safeGetHost(baseUrl) || "",
+    drainingRef,
+    syncingRef,
+    onQueueCountChange,
+    injectWebDrainBatch,
+  });
+
   const onMessage = useCallback(
     async (e: WebViewMessageEvent) => {
       try {
-        const msg = JSON.parse(e.nativeEvent.data || "{}");
+        const msg: WebViewMessage = JSON.parse(e.nativeEvent.data || "{}");
         const host = safeGetHost(baseUrl);
         if (!host) return;
 
         switch (msg.type) {
           case "debug":
-            handleDebug(msg);
-            if ((msg.event === "injected" || msg.event === "hasInjected") && !syncingRef.current) {
+            handlers.handleDebug(msg);
+            if (msg.event === "boot") {
               const tok = await getToken(host);
               const settings = await getSettings(host);
               if (!tok && settings.fullSyncOnLoad) {
@@ -1215,40 +166,34 @@ export default function OpenWebUIView({
             }
             break;
           case "swStatus":
-            await handleSwStatus(msg, host);
+            await handlers.handleSwStatus(msg);
             break;
           case "drainBatchResult":
-            await handleDrainBatchResult(
-              msg,
-              host,
-              drainingRef,
-              onQueueCountChange,
-              injectWebDrainBatch
-            );
+            await handlers.handleDrainBatchResult(msg);
             break;
           case "drainBatchError":
-            handleDrainBatchError(msg, drainingRef);
+            handlers.handleDrainBatchError(msg);
             break;
           case "authToken":
-            await handleAuthToken(msg, host);
+            await handlers.handleAuthToken(msg);
             break;
           case "themeProbe":
-            handleThemeProbe(msg);
+            handlers.handleThemeProbe(msg);
             break;
           case "syncDone":
-            await handleSyncDone(msg, host, syncingRef);
+            await handlers.handleSyncDone(msg);
             break;
           case "queueMessage":
-            await handleQueueMessage(msg, host, onQueueCountChange);
+            await handlers.handleQueueMessage(msg);
             break;
           case "externalLink":
-            await handleExternalLink(msg);
+            await handlers.handleExternalLink(msg);
             break;
           case "cacheResponse":
-            await handleCacheResponse(msg, host);
+            await handlers.handleCacheResponse(msg);
             break;
           case "downloadBlob":
-            await handleDownloadBlob(msg);
+            await handlers.handleDownloadBlob(msg);
             break;
         }
       } catch (err) {
@@ -1260,7 +205,7 @@ export default function OpenWebUIView({
         }
       }
     },
-    [baseUrl, injectWebDrainBatch, injectWebSync, onQueueCountChange]
+    [baseUrl, injectWebSync, handlers]
   );
 
   const injected = useMemo(() => buildInjection(baseUrl), [baseUrl]);
@@ -1273,7 +218,7 @@ export default function OpenWebUIView({
   // Keep page aware of RN connectivity so DOM fallback can enqueue when RN says offline
   React.useEffect(() => {
     try {
-      const js = `(function(){try{ window.__owui_rnOnline = ${online ? "true" : "false"}; if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){ window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'rn',event:'online',online:${online ? "true" : "false"}})); } }catch(_){}})();`;
+      const js = buildConnectivityJS(online);
       webref.current?.injectJavaScript(js);
     } catch (e) {
       logDebug("webview", "connectivity inject error", { error: getErrorMessage(e) });
@@ -1284,21 +229,7 @@ export default function OpenWebUIView({
   const injectThemeProbe = useCallback(() => {
     if (!dev) return;
     try {
-      const js = `(function(){try{
-        var html = document.documentElement||{};
-        var body = document.body||{};
-        var hasDarkClass = !!(html.classList && html.classList.contains('dark'));
-        var dataTheme = (html.getAttribute && html.getAttribute('data-theme')) || null;
-        var colorSchemeStyle = (html.style && html.style.colorScheme) || null;
-        var localTheme = null, localResolved = null;
-        try { localTheme = localStorage.getItem('theme'); } catch(_){}
-        try { localResolved = localStorage.getItem('resolvedTheme'); } catch(_){}
-        var mqlDark = null; try { var m = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)'); mqlDark = !!(m && m.matches); } catch(_){}
-        var rnScheme = (typeof window.__owui_rnColorScheme==='string') ? window.__owui_rnColorScheme : null;
-        var pageBg = null; try { pageBg = window.getComputedStyle(body).backgroundColor; } catch(_){}
-        var htmlBg = null; try { htmlBg = window.getComputedStyle(html).backgroundColor; } catch(_){}
-        window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'themeProbe', payload: { hasDarkClass, dataTheme, colorSchemeStyle, localTheme, localResolved, mqlDark, rnScheme, pageBg, htmlBg } }));
-      }catch(e){ try{ window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'probe', event:'themeProbeError', message:String(e && e.message || e) })); }catch(_){} }})();`;
+      const js = buildThemeProbeJS();
       webref.current?.injectJavaScript(js);
     } catch (e) {
       logDebug("theme", "inject probe error", { error: getErrorMessage(e) });
@@ -1310,27 +241,7 @@ export default function OpenWebUIView({
     try {
       const dark = colorScheme === "dark";
       logInfo("theme", "apply RN scheme", { scheme: colorScheme });
-      const js = `(() => { try {
-        var isDark = ${colorScheme === "dark" ? "true" : "false"};
-        try { window.__owui_rnColorScheme = isDark ? 'dark' : 'light'; } catch(_){ }
-        try {
-          if (typeof window.__owui_notifyThemeChange === 'function') {
-            window.__owui_notifyThemeChange(isDark);
-          } else {
-            // Fallback generic application without overriding explicit user theme
-            try { if (document && document.documentElement && document.documentElement.classList) { document.documentElement.classList.toggle('dark', isDark); } } catch(_){ }
-            try { document && document.documentElement && document.documentElement.setAttribute && document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light'); } catch(_){ }
-            try { document && document.documentElement && document.documentElement.style && (document.documentElement.style.colorScheme = isDark ? 'dark' : 'light'); } catch(_){ }
-            try { var stored = null; try{ stored = localStorage.getItem('theme'); }catch(_){ }
-                 if (stored === null || /^(system|auto)$/i.test(String(stored))) {
-                   try { localStorage.setItem('theme', (isDark ? 'dark' : 'light')); localStorage.setItem('resolvedTheme', (isDark ? 'dark' : 'light')); } catch(_){ }
-                 }
-            } catch(_){ }
-            try { if (window && window.dispatchEvent) { window.dispatchEvent(new Event('storage')); } } catch(_){ }
-          }
-          try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'debug', scope:'rn', event:'colorSchemeApplied', scheme: (isDark ? 'dark':'light') })); } catch(_){ }
-        } catch(_){ }
-      } catch(_){ } })();`;
+      const js = buildApplyColorSchemeJS(dark);
       webref.current?.injectJavaScript(js);
       // Probe immediately after applying
       injectThemeProbe();
@@ -1378,22 +289,7 @@ export default function OpenWebUIView({
     return () => {
       try {
         logDebug("webview", "unmount cleanup");
-
-        currentWebref?.injectJavaScript(`
-
-            (function(){
-
-              if (window.__owui_authPoll) {
-
-                clearInterval(window.__owui_authPoll);
-
-                window.__owui_authPoll = null;
-
-              }
-
-            })();
-
-          `);
+        currentWebref?.injectJavaScript(buildCleanupJS());
       } catch (e) {
         logDebug("webview", "cleanup error", { error: getErrorMessage(e) });
       }
@@ -1473,7 +369,7 @@ export default function OpenWebUIView({
             `(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`
           );
           // Re-assert theme via bootstrap notify if available
-          const APPLY = `(function(){try{var isDark=${colorScheme === "dark" ? "true" : "false"}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
+          const APPLY = buildApplyColorSchemeJS(colorScheme === "dark");
           webref.current?.injectJavaScript(APPLY);
           // Re-probe theme on each navigation to capture changes from the app
           injectThemeProbe();
@@ -1491,7 +387,7 @@ export default function OpenWebUIView({
             `(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`
           );
           // Re-assert theme on navigation changes
-          const APPLY = `(function(){try{var isDark=${colorScheme === "dark" ? "true" : "false"}; if (typeof window.__owui_notifyThemeChange==='function'){ window.__owui_notifyThemeChange(isDark); } }catch(_){}})();`;
+          const APPLY = buildApplyColorSchemeJS(colorScheme === "dark");
           webref.current?.injectJavaScript(APPLY);
           // Re-probe theme on each navigation to capture changes from the app
           injectThemeProbe();

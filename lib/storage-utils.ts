@@ -18,3 +18,10 @@ export async function getStorageJSON<T>(key: string, defaultValue: T): Promise<T
 export async function setStorageJSON<T>(key: string, value: T): Promise<void> {
   await AsyncStorage.setItem(key, JSON.stringify(value));
 }
+
+/**
+ * Remove item from AsyncStorage
+ */
+export async function removeStorageItem(key: string): Promise<void> {
+  await AsyncStorage.removeItem(key);
+}
