@@ -390,6 +390,7 @@ jobs:
 
       - name: 🧾 Open PR to update CHANGELOG.md and versions
         uses: peter-evans/create-pull-request@v6
+        continue-on-error: true
         with:
           base: main
           commit-message: "chore(release): ${{ env.VERSION }} version + changelog"
