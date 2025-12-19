@@ -2,7 +2,7 @@
   "expo": {
     "name": "Open-WebUI-Client",
     "slug": "Open-WebUI-Client",
-    "version": "1.0.0",
+    "version": "1.0.1-rc8",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "openwebuiclient",
@@ -14,15 +14,20 @@
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Allow Open WebUI Client to access your location for features provided by the web app.",
         "NSMicrophoneUsageDescription": "Allow Open WebUI Client to access your microphone for voice input features in the web app.",
-        "NSCameraUsageDescription": "Allow Open WebUI Client to access your camera for video features in the web app."
-      }
+        "NSCameraUsageDescription": "Allow Open WebUI Client to access your camera for video features in the web app.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoadsInWebContent": true
+        }
+      },
+      "buildNumber": "10001"
     },
     "android": {
-      "versionCode": 3,
+      "versionCode": 10002,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
+      "usesCleartextTraffic": true,
       "edgeToEdgeEnabled": true,
       "package": "com.aevumis.openwebuiclient",
       "permissions": [
@@ -48,7 +53,9 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true

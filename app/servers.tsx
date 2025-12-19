@@ -1,3 +1,5 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Link, router } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
   Alert,
@@ -11,13 +13,11 @@ import {
   useColorScheme,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Link, router } from "expo-router";
-import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getSettings, setSettings } from "../lib/outbox";
-import { ServerSettings, ServerItem } from "../lib/types";
-import { safeGetHost, safeParseUrl } from "../lib/url-utils";
+import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getStorageJSON, setStorageJSON } from "../lib/storage-utils";
+import { ServerItem, ServerSettings } from "../lib/types";
+import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 
 async function getServers(): Promise<ServerItem[]> {
   return getStorageJSON<ServerItem[]>(STORAGE_KEYS.SERVERS_LIST, []);
@@ -77,7 +77,9 @@ function isPrivateIP(hostname: string): boolean {
   return false;
 }
 
-function normalizeUrl(input: string): { url: string; warning?: string } | null {
+function normalizeUrl(
+  input: string
+): { url: string; warning?: string; blockedReason?: string } | null {
   const u = safeParseUrl(input.trim());
   if (!u) return null;
   if (!/^https?:$/.test(u.protocol)) return null;
@@ -86,8 +88,19 @@ function normalizeUrl(input: string): { url: string; warning?: string } | null {
   const isPrivate = isPrivateIP(u.hostname);
   let warning: string | undefined;
 
+  if (u.protocol === "http:" && !isPrivate) {
+    return {
+      url: u.toString(),
+      blockedReason:
+        "This server uses http:// over the public internet, which is insecure. Please use https:// instead. If this is a LAN server, use its local IP/hostname (e.g., 192.168.x.x) while on the same network.",
+    };
+  }
+
   if (isPrivate) {
-    warning = "You're connecting to an internal/local address. Please ensure this is intentional.";
+    warning =
+      u.protocol === "http:"
+        ? "You're connecting to an internal/local address over http:// (insecure). Only continue if you trust this network."
+        : "You're connecting to an internal/local address. Please ensure this is intentional.";
   }
 
   // Ensure no trailing slash for base
@@ -153,7 +166,12 @@ export default function ServersScreen() {
       return;
     }
 
-    const { url: normalizedUrl, warning } = result;
+    const { url: normalizedUrl, warning, blockedReason } = result;
+
+    if (blockedReason) {
+      Alert.alert("Insecure URL", blockedReason);
+      return;
+    }
 
     if (warning) {
       Alert.alert("Security Warning", `${warning}\n\nDo you want to continue adding this server?`, [

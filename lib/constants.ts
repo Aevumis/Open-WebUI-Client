@@ -43,3 +43,11 @@ export const MAX_OUTBOX_ITEMS = 1000; // Maximum items per host
 // Defaults
 export const DEFAULT_LIMIT_CONVERSATIONS = 30;
 export const DEFAULT_RPS = 5;
+
+export type SyncMode = "main" | "crawler" | "main+fallback";
+
+export function getSyncMode(): SyncMode {
+  const raw = String(process.env.EXPO_PUBLIC_SYNC_MODE || "main+fallback").trim();
+  if (raw === "main" || raw === "crawler" || raw === "main+fallback") return raw;
+  return "main+fallback";
+}

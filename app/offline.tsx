@@ -1,3 +1,6 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useNavigation } from "@react-navigation/native";
+import { router } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -10,16 +13,15 @@ import {
   useColorScheme,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import Toast from "react-native-toast-message";
 import { getCacheIndex, readCachedEntry, type CacheIndexItem } from "../lib/cache";
-import { safeGetHost } from "../lib/url-utils";
-import { router } from "expo-router";
-import { useNavigation } from "@react-navigation/native";
-import { isFullSyncDone } from "../lib/sync";
+import { debug as logDebug, error as logError, info as logInfo } from "../lib/log";
 import { getSettings } from "../lib/outbox";
-import { ServerItem } from "../lib/types";
-import { getStorageJSON } from "../lib/storage-utils";
 import { STORAGE_KEYS } from "../lib/storage-keys";
+import { getStorageJSON } from "../lib/storage-utils";
+import { isFullSyncDone, manualSync } from "../lib/sync";
+import { ServerItem } from "../lib/types";
+import { safeGetHost } from "../lib/url-utils";
 
 export default function OfflineScreen() {
   const navigation = useNavigation();
@@ -60,11 +62,106 @@ export default function OfflineScreen() {
   const [hostFilter, setHostFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
   const [initializing, setInitializing] = useState(true);
+  const [syncingType, setSyncingType] = useState<null | "incremental" | "full">(null);
   const [syncInfo, setSyncInfo] = useState<{
     host: string;
     syncDone: boolean;
     syncEnabled: boolean;
   } | null>(null);
+
+  const getActiveServer = async (): Promise<ServerItem | null> => {
+    try {
+      const [servers, activeRaw] = await Promise.all([
+        getStorageJSON<ServerItem[]>(STORAGE_KEYS.SERVERS_LIST, []),
+        AsyncStorage.getItem(STORAGE_KEYS.SERVERS_ACTIVE),
+      ]);
+      if (!activeRaw) return null;
+      return servers.find((s: ServerItem) => s.id === activeRaw) || null;
+    } catch (e) {
+      logDebug("offline", "getActiveServer failed", { error: String(e) });
+      return null;
+    }
+  };
+
+  const refreshIndex = async () => {
+    try {
+      const idx = await getCacheIndex();
+      setItems(idx);
+    } catch (e) {
+      logDebug("offline", "refreshIndex failed", { error: String(e) });
+    }
+  };
+
+  const refreshSyncInfo = async () => {
+    try {
+      const activeServer = await getActiveServer();
+      if (!activeServer) {
+        setSyncInfo(null);
+        return;
+      }
+      const host = safeGetHost(activeServer.url) || "";
+      if (!host) {
+        setSyncInfo(null);
+        return;
+      }
+      const [syncDone, settings] = await Promise.all([
+        isFullSyncDone(activeServer.url),
+        getSettings(host),
+      ]);
+      setSyncInfo({ host, syncDone, syncEnabled: settings.fullSyncOnLoad });
+    } catch (e) {
+      logDebug("offline", "refreshSyncInfo failed", { error: String(e) });
+    }
+  };
+
+  const runSync = async (forceFullSync: boolean) => {
+    if (syncingType) return;
+    setSyncingType(forceFullSync ? "full" : "incremental");
+    try {
+      const activeServer = await getActiveServer();
+      if (!activeServer) {
+        Toast.show({
+          type: "error",
+          text1: "No active server selected",
+          text2: "Go to Servers, select a server, then retry Sync.",
+        });
+        return;
+      }
+
+      logInfo("offline", "manual sync requested", {
+        forceFullSync,
+        url: activeServer.url,
+      });
+
+      const res = await manualSync(activeServer.url, forceFullSync);
+      if (!res) {
+        Toast.show({
+          type: "error",
+          text1: "Sync couldn’t start",
+          text2: "Open the server, sign in if needed, then retry Sync.",
+        });
+        return;
+      }
+
+      Toast.show({
+        type: "success",
+        text1: "Sync complete",
+        text2: `Synced ${res.conversations} conversations and ${res.messages} messages.`,
+      });
+
+      await refreshIndex();
+      await refreshSyncInfo();
+    } catch (e) {
+      logError("offline", "manual sync failed", { error: String(e) });
+      Toast.show({
+        type: "error",
+        text1: "Sync failed",
+        text2: "Please try again. If this keeps happening, re-open the server and retry.",
+      });
+    } finally {
+      setSyncingType(null);
+    }
+  };
 
   const goBackOrServers = () => {
     try {
@@ -223,7 +320,7 @@ export default function OfflineScreen() {
     if (!data) return;
     const href = `/offline/view?host=${encodeURIComponent(item.host)}&id=${encodeURIComponent(item.id)}`;
     // Cast to any to satisfy current route typings until typegen picks up new file
-    router.push(href);
+    router.push(href as any);
   };
 
   return (
@@ -235,7 +332,56 @@ export default function OfflineScreen() {
               <Text style={{ color: C.primary, fontWeight: "700" }}>{"\u2039"} Back</Text>
             </TouchableOpacity>
           </View>
-          <Text style={{ fontSize: 18, fontWeight: "700", color: C.text }}>Offline content</Text>
+          <View
+            style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
+          >
+            <Text
+              style={{ fontSize: 18, fontWeight: "700", color: C.text, flex: 1 }}
+              numberOfLines={1}
+            >
+              Offline content
+            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <TouchableOpacity
+                accessibilityLabel="Sync"
+                onPress={() => runSync(false)}
+                disabled={syncingType !== null}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  marginRight: 8,
+                  backgroundColor: C.primary,
+                  opacity: syncingType ? 0.7 : 1,
+                }}
+              >
+                {syncingType === "incremental" ? (
+                  <ActivityIndicator color="#ffffff" />
+                ) : (
+                  <Text style={{ color: "#ffffff", fontWeight: "700" }}>Sync</Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                accessibilityLabel="Full Sync"
+                onPress={() => runSync(true)}
+                disabled={syncingType !== null}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: C.primary,
+                  opacity: syncingType ? 0.7 : 1,
+                }}
+              >
+                {syncingType === "full" ? (
+                  <ActivityIndicator color={C.primary} />
+                ) : (
+                  <Text style={{ color: C.primary, fontWeight: "700" }}>Full Sync</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
           <Text style={{ color: C.muted }}>Cached conversations</Text>
           <View style={{ alignItems: "center", justifyContent: "center", paddingVertical: 40 }}>
             <ActivityIndicator size="small" color={C.primary} />
@@ -262,9 +408,60 @@ export default function OfflineScreen() {
                   <Text style={{ color: C.primary, fontWeight: "700" }}>{"\u2039"} Back</Text>
                 </TouchableOpacity>
               </View>
-              <Text style={{ fontSize: 18, fontWeight: "700", color: C.text }}>
-                Offline content
-              </Text>
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <Text
+                  style={{ fontSize: 18, fontWeight: "700", color: C.text, flex: 1 }}
+                  numberOfLines={1}
+                >
+                  Offline content
+                </Text>
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <TouchableOpacity
+                    accessibilityLabel="Sync"
+                    onPress={() => runSync(false)}
+                    disabled={syncingType !== null}
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 8,
+                      marginRight: 8,
+                      backgroundColor: C.primary,
+                      opacity: syncingType ? 0.7 : 1,
+                    }}
+                  >
+                    {syncingType === "incremental" ? (
+                      <ActivityIndicator color="#ffffff" />
+                    ) : (
+                      <Text style={{ color: "#ffffff", fontWeight: "700" }}>Sync</Text>
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    accessibilityLabel="Full Sync"
+                    onPress={() => runSync(true)}
+                    disabled={syncingType !== null}
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: C.primary,
+                      opacity: syncingType ? 0.7 : 1,
+                    }}
+                  >
+                    {syncingType === "full" ? (
+                      <ActivityIndicator color={C.primary} />
+                    ) : (
+                      <Text style={{ color: C.primary, fontWeight: "700" }}>Full Sync</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
               <Text style={{ color: C.muted }}>Cached conversations</Text>
               <View style={{ marginTop: 12 }}>
                 <ScrollView

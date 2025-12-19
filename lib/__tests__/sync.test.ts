@@ -1,14 +1,7 @@
-import {
-  fullSync,
-  incrementalSync,
-  isFullSyncDone,
-  maybeFullSync,
-  forceSyncReset,
-  manualSync,
-} from "../sync";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as outbox from "../outbox";
 import * as cache from "../cache";
+import * as outbox from "../outbox";
+import { fullSync, incrementalSync, manualSync, maybeFullSync } from "../sync";
 
 // Mock dependencies
 jest.mock("@react-native-async-storage/async-storage", () =>
@@ -39,6 +32,7 @@ describe("sync", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (global.fetch as jest.Mock).mockReset();
     (outbox.getToken as jest.Mock).mockResolvedValue(mockToken);
     (outbox.getSettings as jest.Mock).mockResolvedValue({
       limitConversations: 10,
@@ -118,6 +112,59 @@ describe("sync", () => {
     it("should stop if token is missing", async () => {
       (outbox.getToken as jest.Mock).mockResolvedValue(null);
       await expect(fullSync(mockBaseUrl)).rejects.toThrow("No auth token captured yet");
+    });
+  });
+
+  describe("manualSync", () => {
+    it("forceFullSync=true should reset and run full sync", async () => {
+      (outbox.getToken as jest.Mock).mockResolvedValue(mockToken);
+      (AsyncStorage.getItem as jest.Mock).mockResolvedValue(null);
+      (global.fetch as jest.Mock)
+        .mockResolvedValueOnce({ ok: true, json: async () => [] })
+        .mockResolvedValueOnce({ ok: true, json: async () => [] });
+
+      const res = await manualSync(mockBaseUrl, true);
+      expect(res).not.toBeNull();
+
+      expect(AsyncStorage.removeItem).toHaveBeenCalledWith(expect.stringContaining("sync:done"));
+      expect(AsyncStorage.removeItem).toHaveBeenCalledWith(
+        expect.stringContaining("sync:lastTime")
+      );
+    });
+
+    it("forceFullSync=false should run incremental when done flag is set", async () => {
+      (outbox.getToken as jest.Mock).mockResolvedValue(mockToken);
+      (AsyncStorage.getItem as jest.Mock).mockImplementation((key) => {
+        if (key.includes("sync:done")) return String(Date.now());
+        if (key.includes("sync:lastTime")) return String(Date.now() - 10000);
+        return null;
+      });
+      (global.fetch as jest.Mock).mockResolvedValueOnce({ ok: true, json: async () => [] });
+
+      const res = await manualSync(mockBaseUrl, false);
+      expect(res).not.toBeNull();
+    });
+
+    it("forceFullSync=false should run full sync when done flag is missing", async () => {
+      (outbox.getToken as jest.Mock).mockResolvedValue(mockToken);
+      (AsyncStorage.getItem as jest.Mock).mockResolvedValue(null);
+      (global.fetch as jest.Mock)
+        .mockResolvedValueOnce({ ok: true, json: async () => [] })
+        .mockResolvedValueOnce({ ok: true, json: async () => [] });
+
+      const res = await manualSync(mockBaseUrl, false);
+      expect(res).not.toBeNull();
+    });
+
+    it("should return null when done=true but token is missing (incremental cannot run)", async () => {
+      (outbox.getToken as jest.Mock).mockResolvedValue(null);
+      (AsyncStorage.getItem as jest.Mock).mockImplementation((key) => {
+        if (key.includes("sync:done")) return String(Date.now());
+        return null;
+      });
+
+      const res = await manualSync(mockBaseUrl, false);
+      expect(res).toBeNull();
     });
   });
 

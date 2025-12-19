@@ -1,31 +1,32 @@
+import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
+import * as Haptics from "expo-haptics";
+import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Text,
   TouchableOpacity,
-  View,
   useColorScheme,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useLocalSearchParams, router } from "expo-router";
-import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
-import OpenWebUIView from "../components/OpenWebUIView";
-import { maybeFullSync, isFullSyncDone } from "../lib/sync";
-import { getCacheIndex } from "../lib/cache";
-import { drain, getSettings, count } from "../lib/outbox";
-import { debug as logDebug, info as logInfo } from "../lib/log";
 import Toast from "react-native-toast-message";
-import * as Haptics from "expo-haptics";
-import { SYNC_INTERVAL } from "../lib/constants";
-import { safeGetHost } from "../lib/url-utils";
+import OpenWebUIView from "../components/OpenWebUIView";
+import { getCacheIndex } from "../lib/cache";
+import { getSyncMode, SYNC_INTERVAL } from "../lib/constants";
+import { getErrorMessage } from "../lib/error-utils";
+import { debug as logDebug, info as logInfo } from "../lib/log";
+import { count, drain, getSettings } from "../lib/outbox";
 import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getStorageJSON } from "../lib/storage-utils";
+import { isFullSyncDone, maybeFullSync } from "../lib/sync";
 import { ServerItem } from "../lib/types";
-import { getErrorMessage } from "../lib/error-utils";
+import { safeGetHost } from "../lib/url-utils";
 
 export default function ClientScreen() {
   const params = useLocalSearchParams<{ id: string }>();
+  const syncMode = getSyncMode();
   const [url, setUrl] = useState<string | null>(null);
   const [label, setLabel] = useState<string | undefined>(undefined);
   const [isOnline, setIsOnline] = useState(true);
@@ -56,6 +57,9 @@ export default function ClientScreen() {
         };
 
   useEffect(() => {
+    try {
+      logInfo("sync", "mode", { mode: syncMode });
+    } catch {}
     const sub = NetInfo.addEventListener((state: NetInfoState) => {
       const next = state.isInternetReachable ?? !!state.isConnected;
       logDebug("net", "change", {
@@ -117,20 +121,24 @@ export default function ClientScreen() {
               setSyncStatus("done");
             } else {
               setSyncStatus("syncing");
-              logInfo("sync", "maybeFullSync start");
-              const res = await maybeFullSync(url);
-              if (res) {
-                logInfo("sync", "fullSync result", res);
-                setSyncStatus("done");
-                try {
-                  const idx = await getCacheIndex();
-                  const count = idx.filter((it) => it.host === host).length;
-                  logInfo("cache", "index count for host", { host, count });
-                } catch (e) {
-                  logDebug("client", "cache index error", { error: getErrorMessage(e) });
+              if (syncMode === "crawler") {
+                logInfo("sync", "crawler-only mode: skip native maybeFullSync");
+              } else {
+                logInfo("sync", "maybeFullSync start");
+                const res = await maybeFullSync(url);
+                if (res) {
+                  logInfo("sync", "fullSync result", res);
+                  setSyncStatus("done");
+                  try {
+                    const idx = await getCacheIndex();
+                    const count = idx.filter((it) => it.host === host).length;
+                    logInfo("cache", "index count for host", { host, count });
+                  } catch (e) {
+                    logDebug("client", "cache index error", { error: getErrorMessage(e) });
+                  }
                 }
+                logInfo("sync", "maybeFullSync done");
               }
-              logInfo("sync", "maybeFullSync done");
             }
           } else {
             setSyncStatus("disabled");

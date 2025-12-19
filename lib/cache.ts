@@ -1,7 +1,7 @@
-import * as FileSystem from "expo-file-system";
-import { CACHE_MAX_SIZE_BYTES, CACHE_EVICTION_TARGET } from "./constants";
-import { safeParseUrl } from "./url-utils";
+import * as FileSystem from "expo-file-system/legacy";
+import { CACHE_EVICTION_TARGET, CACHE_MAX_SIZE_BYTES } from "./constants";
 import { ConversationData } from "./types";
+import { safeParseUrl } from "./url-utils";
 
 export type CachedEntry = {
   url: string;

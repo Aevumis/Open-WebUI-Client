@@ -1,11 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { cacheApiResponse } from "./cache";
-import { getSettings, getToken } from "./outbox";
-import { debug as logDebug, info as logInfo } from "./log";
-import { TOKEN_AVAILABILITY_WAIT, SYNC_LOOKBACK_MS } from "./constants";
-import { safeGetHost } from "./url-utils";
-import { STORAGE_KEYS } from "./storage-keys";
+import { SYNC_LOOKBACK_MS, TOKEN_AVAILABILITY_WAIT } from "./constants";
 import { getErrorMessage } from "./error-utils";
+import { debug as logDebug, info as logInfo } from "./log";
+import { getSettings, getToken } from "./outbox";
+import { STORAGE_KEYS } from "./storage-keys";
+import { safeGetHost } from "./url-utils";
 
 async function fetchJSON(url: string, token: string) {
   const res = await fetch(url, {
@@ -19,6 +19,15 @@ async function fetchJSON(url: string, token: string) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+function toEpochMs(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value) {
+    const t = Date.parse(value);
+    return Number.isFinite(t) ? t : 0;
+  }
+  return 0;
 }
 
 /**
@@ -177,7 +186,7 @@ export async function incrementalSync(
     if (!Array.isArray(data) || data.length === 0) break;
 
     for (const it of data) {
-      const chatTime = Math.max(it.updated_at || 0, it.created_at || 0);
+      const chatTime = Math.max(toEpochMs(it.updated_at), toEpochMs(it.created_at));
       if (chatTime > cutoffTime) {
         newChats.push({
           id: it.id,

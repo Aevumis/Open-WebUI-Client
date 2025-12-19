@@ -509,3 +509,21 @@ fi
   - [ ] Avoid `${{ ... }}` inside JS template strings; use step `env` instead.
   - [ ] When posting PR comments, construct strings with `['line1','line2'].join('\n')`.
   - [ ] Keep artifact URL extraction tolerant to multiple JSON shapes using `//` fallback paths.
+## 2025-12-19 – WebView Injection Regex & Syntax Errors
+
+- **Symptom**:
+  - Offline sync failed to start (`[sync] maybeFullSync: no token yet`).
+  - WebView logs showed `evalError: Invalid regular expression: missing /` or `SyntaxError: Unexpected string`.
+  - Silent failures where `hasInjected` remained `false` without clear errors initially.
+- **Root Cause**:
+  1.  **Dynamic Regex Construction**: Using `new RegExp(name + '=')` in injected code is unsafe if `name` contains special characters or if the string escaping conflicts with the injection wrapper.
+  2.  **Template Literal Escaping**: Escaped single quotes `'\''` inside the injected script's template literals evaluated to `'''` (invalid JS syntax) when the code was stringified and injected via `eval()`.
+  3.  **Silent Error Swallowing**: The `WRAP` function in `OpenWebUIView.tsx` caught errors but didn't originally log the `stack` or `name`, hiding the exact location of syntax errors.
+- **Fix**:
+  1.  **String Parsing over Regex**: Replaced regex-based cookie parsing and `content-disposition` parsing with safer `indexOf`/`slice`/`split` operations.
+  2.  **Safe Quotes**: Used double quotes to wrap single quote literals (e.g., `"'"` instead of `'\''`) within template literals to ensure they survive injection stringification.
+  3.  **Enhanced Debugging**: Updated `OpenWebUIView` wrapper to log `injectStart` and include `name`, `message`, and `stack` in `evalError` payloads.
+- **Validation**:
+  - `evalError` logs disappeared.
+  - `[webview] debug { event: 'authCookieCaptured' }` appeared.
+  - `[sync] chat ok` logs confirmed successful full sync.

@@ -1,18 +1,18 @@
+import * as FileSystem from "expo-file-system/legacy";
+import * as Haptics from "expo-haptics";
+import * as Sharing from "expo-sharing";
+import * as WebBrowser from "expo-web-browser";
 import React, { useCallback } from "react";
 import { Alert, Platform } from "react-native";
-import * as WebBrowser from "expo-web-browser";
-import * as FileSystem from "expo-file-system";
-import * as Sharing from "expo-sharing";
-import * as Haptics from "expo-haptics";
 import Toast from "react-native-toast-message";
 
 import { cacheApiResponse, type CachedEntry } from "../lib/cache";
-import { setToken, count, getToken, removeOutboxItems } from "../lib/outbox";
-import { debug as logDebug, info as logInfo } from "../lib/log";
-import { STORAGE_KEYS } from "../lib/storage-keys";
 import { getErrorMessage } from "../lib/error-utils";
-import { getStorageJSON, setStorageJSON, removeStorageItem } from "../lib/storage-utils";
-import { WebViewMessage, ChatCompletionBody, ConversationData } from "../lib/types";
+import { debug as logDebug, info as logInfo } from "../lib/log";
+import { count, getToken, removeOutboxItems, setToken } from "../lib/outbox";
+import { STORAGE_KEYS } from "../lib/storage-keys";
+import { getStorageJSON, removeStorageItem, setStorageJSON } from "../lib/storage-utils";
+import { ChatCompletionBody, ConversationData, WebViewMessage } from "../lib/types";
 
 export interface WebViewHandlersContext {
   host: string;
@@ -25,9 +25,22 @@ export interface WebViewHandlersContext {
 export function useWebViewHandlers(context: WebViewHandlersContext) {
   const { host, drainingRef, syncingRef, onQueueCountChange, injectWebDrainBatch } = context;
 
-  const handleDebug = useCallback((msg: Extract<WebViewMessage, { type: "debug" }>) => {
-    logDebug("webview", "debug", msg);
-  }, []);
+  const handleDebug = useCallback(
+    (msg: Extract<WebViewMessage, { type: "debug" }>) => {
+      logDebug("webview", "debug", msg);
+      try {
+        if (msg.scope === "injection" && msg.event === "syncError") {
+          syncingRef.current = false;
+          Toast.show({
+            type: "error",
+            text1: "Offline sync couldn’t complete",
+            text2: "Open the server and sign in, then retry Sync.",
+          });
+        }
+      } catch (_) {}
+    },
+    [syncingRef]
+  );
 
   const handleAuthToken = useCallback(
     async (msg: Extract<WebViewMessage, { type: "authToken" }>) => {
@@ -263,6 +276,7 @@ export function useWebViewHandlers(context: WebViewHandlersContext) {
         url: msg.url,
         capturedAt: Date.now(),
         data: msg.data as ConversationData,
+        title: typeof msg.title === "string" ? msg.title : undefined,
       };
       await cacheApiResponse(host, entry);
     },
