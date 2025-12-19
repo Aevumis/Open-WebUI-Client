@@ -182,23 +182,30 @@ jobs:
 
       - name: 🏗️ Build iOS (ios-internal)
         id: build_ios
+        continue-on-error: true
         run: |
-          eas build --non-interactive --platform ios --profile ios-internal --wait --json > ios_build.json
-          cat ios_build.json
-          IOS_BUILD_ID=$(cat ios_build.json | jq -r '.[0].id // .id // empty')
-          if [ -z "$IOS_BUILD_ID" ] || [ "$IOS_BUILD_ID" = "null" ]; then
-            echo "Error: Failed to extract iOS build ID from EAS response"
+          if eas build --non-interactive --platform ios --profile ios-internal --wait --json > ios_build.json; then
             cat ios_build.json
-            exit 1
+            IOS_BUILD_ID=$(cat ios_build.json | jq -r '.[0].id // .id // empty')
+            if [ -n "$IOS_BUILD_ID" ] && [ "$IOS_BUILD_ID" != "null" ]; then
+              echo "IOS_BUILD_ID=$IOS_BUILD_ID" >> $GITHUB_ENV
+              echo "## 🏗️ iOS Build" >> $GITHUB_STEP_SUMMARY
+              echo "- Build ID: $IOS_BUILD_ID" >> $GITHUB_STEP_SUMMARY
+              echo "- Profile: ios-internal" >> $GITHUB_STEP_SUMMARY
+              echo "- Status: ✅ Success" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "Failed to extract iOS build ID"
+              exit 1
+            fi
+          else
+            echo "iOS build command failed. This is expected if Apple credentials are not configured."
+            echo "## 🏗️ iOS Build" >> $GITHUB_STEP_SUMMARY
+            echo "- Status: ⚠️ Skipped or Failed (Check logs if this was unexpected)" >> $GITHUB_STEP_SUMMARY
+            exit 0 # Make it "success" so workflow continues but IOS_BUILD_ID is not set
           fi
-          echo "IOS_BUILD_ID=$IOS_BUILD_ID" >> $GITHUB_ENV
-
-          echo "## 🏗️ iOS Build" >> $GITHUB_STEP_SUMMARY
-          echo "- Build ID: $IOS_BUILD_ID" >> $GITHUB_STEP_SUMMARY
-          echo "- Profile: ios-internal" >> $GITHUB_STEP_SUMMARY
-          echo "- Status: ✅ Success" >> $GITHUB_STEP_SUMMARY
 
       - name: 📥 Download iOS IPA
+        if: env.IOS_BUILD_ID != '' && env.IOS_BUILD_ID != 'null'
         run: |
           FNAME="Open-WebUI-Client-${VERSION}-ios.ipa"
           ID="$IOS_BUILD_ID"
@@ -291,7 +298,9 @@ jobs:
         run: |
           echo "Generating SHA256 checksums"
           shasum -a 256 "$ANDROID_APK" > SHA256SUMS.txt
-          shasum -a 256 "$IOS_IPA" >> SHA256SUMS.txt
+          if [ -n "$IOS_IPA" ] && [ -f "$IOS_IPA" ]; then
+            shasum -a 256 "$IOS_IPA" >> SHA256SUMS.txt
+          fi
 
       - name: 📝 Generate Release Notes
         id: notes
@@ -311,7 +320,9 @@ jobs:
           echo "" >> RELEASE_NOTES.md
           echo "## Downloads" >> RELEASE_NOTES.md
           echo "- Android APK: ${ANDROID_APK}" >> RELEASE_NOTES.md
-          echo "- iOS IPA (for internal/sideload testing): ${IOS_IPA}" >> RELEASE_NOTES.md
+          if [ -n "$IOS_IPA" ] && [ -f "$IOS_IPA" ]; then
+            echo "- iOS IPA (for internal/sideload testing): ${IOS_IPA}" >> RELEASE_NOTES.md
+          fi
           if [ -n "${{ secrets.TESTFLIGHT_PUBLIC_LINK }}" ]; then
             echo "- TestFlight: ${{ secrets.TESTFLIGHT_PUBLIC_LINK }}" >> RELEASE_NOTES.md
           else
@@ -337,6 +348,7 @@ jobs:
           body_path: RELEASE_NOTES.md
           draft: false
           prerelease: false
+          fail_on_unresolved_files: false
           files: |
             ${{ env.ANDROID_APK }}
             ${{ env.IOS_IPA }}
