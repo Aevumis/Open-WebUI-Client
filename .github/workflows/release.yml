@@ -28,7 +28,7 @@ jobs:
           cache: npm
 
       - name: 📦 Install dependencies
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       - name: 🧪 Validate tag and derive version
         run: |
@@ -399,4 +399,4 @@ jobs:
           echo "### Environment variables:" >> $GITHUB_STEP_SUMMARY
           env | grep -E "(BUILD_ID|VERSION|APK|IPA)" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY || echo "No relevant env vars" >> $GITHUB_STEP_SUMMARY
           echo "### EAS CLI version:" >> $GITHUB_STEP_SUMMARY
-          eas --version >> $GITHUB_STEP_SUMMARY
+          eas --version >> $GITHUB_STEP_SUMMARY || echo "EAS CLI not installed" >> $GITHUB_STEP_SUMMARY
