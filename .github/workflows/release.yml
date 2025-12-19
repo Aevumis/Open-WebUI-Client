@@ -348,7 +348,7 @@ jobs:
           body_path: RELEASE_NOTES.md
           draft: false
           prerelease: false
-          fail_on_unresolved_files: false
+          fail_on_unmatched_files: false
           files: |
             ${{ env.ANDROID_APK }}
             ${{ env.IOS_IPA }}
@@ -391,6 +391,7 @@ jobs:
       - name: 🧾 Open PR to update CHANGELOG.md and versions
         uses: peter-evans/create-pull-request@v6
         with:
+          base: main
           commit-message: "chore(release): ${{ env.VERSION }} version + changelog"
           title: "chore(release): ${{ env.VERSION }} version + changelog"
           body: "Automated version bump in app.json/package.json and CHANGELOG.md for ${{ env.VERSION }}"
