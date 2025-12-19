@@ -1,0 +1,7 @@
+Some text
+{
+  "outer": {
+    "inner": "value"
+  }
+}
+Some more text

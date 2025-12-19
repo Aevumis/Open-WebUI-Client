@@ -30,12 +30,20 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
-      - name: 🧪 Print tag and derive version
+      - name: 🧪 Validate tag and derive version
         run: |
           echo "GITHUB_REF=$GITHUB_REF"
           echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+
+          # Validate tag format
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "Error: Invalid tag format. Expected vX.Y.Z (or vX.Y.Z-suffix), got $GITHUB_REF_NAME"
+            exit 1
+          fi
+
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "✓ Valid version: $VERSION"
 
       - name: 🧰 Setup Expo/EAS
         uses: expo/expo-github-action@v8
@@ -82,33 +90,83 @@ jobs:
         run: |
           eas build --non-interactive --platform android --profile production-apk --wait --json > android_build.json
           cat android_build.json
-          ANDROID_BUILD_ID=$(cat android_build.json | jq -r '.[0].id // .id')
+          ANDROID_BUILD_ID=$(cat android_build.json | jq -r '.[0].id // .id // empty')
+          if [ -z "$ANDROID_BUILD_ID" ] || [ "$ANDROID_BUILD_ID" = "null" ]; then
+            echo "Error: Failed to extract Android build ID from EAS response"
+            cat android_build.json
+            exit 1
+          fi
           echo "ANDROID_BUILD_ID=$ANDROID_BUILD_ID" >> $GITHUB_ENV
+          
+          echo "## 🏗️ Android Build" >> $GITHUB_STEP_SUMMARY
+          echo "- Build ID: $ANDROID_BUILD_ID" >> $GITHUB_STEP_SUMMARY
+          echo "- Profile: production-apk" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ✅ Success" >> $GITHUB_STEP_SUMMARY
 
       - name: 📥 Download Android APK
         run: |
           FNAME="Open-WebUI-Client-${VERSION}-android.apk"
-          echo "Resolving Android artifact URL for $ANDROID_BUILD_ID"
+          ID="$ANDROID_BUILD_ID"
+          echo "Resolving Android artifact URL for $ID"
           
-          # Robust build info fetching with JSON extraction
-          eas build:view --non-interactive --json --id "$ANDROID_BUILD_ID" > android_view_raw.json 2>&1
-          
-          # Extract only JSON part (from first { to last })
-          sed -n '/{/,/}/p' android_view_raw.json > android_view.json
-          
-          # Validate extracted JSON
-          if ! jq empty android_view.json 2>/dev/null; then
-            echo "Invalid JSON extracted, showing raw output:"
-            cat android_view_raw.json
+          for i in {1..3}; do
+            echo "Attempt $i to fetch build details..."
+            # Try JSON format
+            if eas build:view "$ID" --json > android_view_raw.json 2>&1; then
+              # Robust extraction from first { to last } using node
+              node -e "const fs=require('fs');const s=fs.readFileSync(0,'utf8');const i=s.indexOf('{'),j=s.lastIndexOf('}');if(i>=0&&j>=0)console.log(s.substring(i,j+1))" < android_view_raw.json > android_view.json
+              if jq empty android_view.json 2>/dev/null; then
+                echo "Valid JSON extracted"
+                break
+              fi
+            fi
+
+            # Try text format parsing
+            if eas build:view "$ID" > android_view_text.txt 2>&1; then
+              URL=$(grep "^Artifact" android_view_text.txt | awk "{print \$2}")
+              if [ -n "$URL" ]; then
+                echo "{\"artifacts\":{\"buildUrl\":\"$URL\"}}" > android_view.json
+                echo "Extracted URL from text: $URL"
+                break
+              fi
+            fi
+
+            # Last resort: Direct API call
+            if [ $i -eq 3 ]; then
+              echo "Trying direct API call as last resort..."
+              curl -H "Authorization: Bearer ${{ secrets.EXPO_TOKEN }}" \
+                   -H "Accept: application/json" \
+                   "https://api.expo.dev/v2/builds/$ID" > android_view.json
+            fi
+
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+
+          # Check if android_view.json has valid content
+          if [ ! -s android_view.json ] || ! jq empty android_view.json 2>/dev/null; then
+            echo "Failed to fetch valid build details after 3 attempts"
+            cat android_view_raw.json 2>/dev/null || echo "No raw output"
             exit 1
           fi
+
+          URL=$(jq -r ".artifacts.buildUrl // 
+                        .artifacts.applicationArchiveUrl // 
+                        .artifacts.appBuildUrl // 
+                        .data.artifacts.buildUrl // 
+                        .data.artifacts.applicationArchiveUrl // 
+                        .data.artifacts.appBuildUrl // 
+                        empty" android_view.json)
           
-          echo "Build view content:"
-          cat android_view.json
-          
-          URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' android_view.json)
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "Could not resolve Android artifact URL from android_view.json"
+            echo "Could not resolve Android artifact URL from JSON, checking text fallback..."
+            if [ -f android_view_text.txt ]; then
+              URL=$(grep "^Artifact" android_view_text.txt | awk "{print \$2}")
+            fi
+          fi
+
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "Error: Could not resolve Android artifact URL"
             cat android_view.json
             exit 1
           fi
@@ -127,33 +185,83 @@ jobs:
         run: |
           eas build --non-interactive --platform ios --profile ios-internal --wait --json > ios_build.json
           cat ios_build.json
-          IOS_BUILD_ID=$(cat ios_build.json | jq -r '.[0].id // .id')
+          IOS_BUILD_ID=$(cat ios_build.json | jq -r '.[0].id // .id // empty')
+          if [ -z "$IOS_BUILD_ID" ] || [ "$IOS_BUILD_ID" = "null" ]; then
+            echo "Error: Failed to extract iOS build ID from EAS response"
+            cat ios_build.json
+            exit 1
+          fi
           echo "IOS_BUILD_ID=$IOS_BUILD_ID" >> $GITHUB_ENV
+
+          echo "## 🏗️ iOS Build" >> $GITHUB_STEP_SUMMARY
+          echo "- Build ID: $IOS_BUILD_ID" >> $GITHUB_STEP_SUMMARY
+          echo "- Profile: ios-internal" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ✅ Success" >> $GITHUB_STEP_SUMMARY
 
       - name: 📥 Download iOS IPA
         run: |
           FNAME="Open-WebUI-Client-${VERSION}-ios.ipa"
-          echo "Resolving iOS artifact URL for $IOS_BUILD_ID"
+          ID="$IOS_BUILD_ID"
+          echo "Resolving iOS artifact URL for $ID"
           
-          # Robust build info fetching with JSON extraction
-          eas build:view --non-interactive --json --id "$IOS_BUILD_ID" > ios_view_raw.json 2>&1
-          
-          # Extract only JSON part (from first { to last })
-          sed -n '/{/,/}/p' ios_view_raw.json > ios_view.json
-          
-          # Validate extracted JSON
-          if ! jq empty ios_view.json 2>/dev/null; then
-            echo "Invalid JSON extracted, showing raw output:"
-            cat ios_view_raw.json
+          for i in {1..3}; do
+            echo "Attempt $i to fetch build details..."
+            # Try JSON format
+            if eas build:view "$ID" --json > ios_view_raw.json 2>&1; then
+              # Robust extraction from first { to last } using node
+              node -e "const fs=require('fs');const s=fs.readFileSync(0,'utf8');const i=s.indexOf('{'),j=s.lastIndexOf('}');if(i>=0&&j>=0)console.log(s.substring(i,j+1))" < ios_view_raw.json > ios_view.json
+              if jq empty ios_view.json 2>/dev/null; then
+                echo "Valid JSON extracted"
+                break
+              fi
+            fi
+
+            # Try text format parsing
+            if eas build:view "$ID" > ios_view_text.txt 2>&1; then
+              URL=$(grep "^Artifact" ios_view_text.txt | awk "{print \$2}")
+              if [ -n "$URL" ]; then
+                echo "{\"artifacts\":{\"buildUrl\":\"$URL\"}}" > ios_view.json
+                echo "Extracted URL from text: $URL"
+                break
+              fi
+            fi
+
+            # Last resort: Direct API call
+            if [ $i -eq 3 ]; then
+              echo "Trying direct API call as last resort..."
+              curl -H "Authorization: Bearer ${{ secrets.EXPO_TOKEN }}" \
+                   -H "Accept: application/json" \
+                   "https://api.expo.dev/v2/builds/$ID" > ios_view.json
+            fi
+
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+
+          # Check if ios_view.json has valid content
+          if [ ! -s ios_view.json ] || ! jq empty ios_view.json 2>/dev/null; then
+            echo "Failed to fetch valid build details after 3 attempts"
+            cat ios_view_raw.json 2>/dev/null || echo "No raw output"
             exit 1
           fi
+
+          URL=$(jq -r ".artifacts.buildUrl // 
+                        .artifacts.applicationArchiveUrl // 
+                        .artifacts.appBuildUrl // 
+                        .data.artifacts.buildUrl // 
+                        .data.artifacts.applicationArchiveUrl // 
+                        .data.artifacts.appBuildUrl // 
+                        empty" ios_view.json)
           
-          echo "Build view content:"
-          cat ios_view.json
-          
-          URL=$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // .artifacts.appBuildUrl // empty' ios_view.json)
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "Could not resolve iOS artifact URL from ios_view.json"
+            echo "Could not resolve iOS artifact URL from JSON, checking text fallback..."
+            if [ -f ios_view_text.txt ]; then
+              URL=$(grep "^Artifact" ios_view_text.txt | awk "{print \$2}")
+            fi
+          fi
+
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "Error: Could not resolve iOS artifact URL"
             cat ios_view.json
             exit 1
           fi
@@ -168,11 +276,16 @@ jobs:
           fi
 
       - name: 🚀 Submit iOS to TestFlight (optional)
-        if: ${{ env.IOS_BUILD_ID != '' }}
+        if: ${{ env.IOS_BUILD_ID != '' && env.IOS_BUILD_ID != 'null' }}
         run: |
-          # Requires App Store Connect credentials configured in EAS or via secrets
-          # If configured, this will submit the latest build for TestFlight
-          eas submit --platform ios --latest --non-interactive || echo "TestFlight submit failed or not configured; continuing"
+          echo "Attempting TestFlight submission for build $IOS_BUILD_ID"
+          if eas submit --platform ios --latest --non-interactive; then
+            echo "TestFlight submission succeeded"
+          else
+            echo "⚠️ TestFlight submission failed or not configured"
+            echo "This is expected if App Store Connect credentials are not set up"
+          fi
+        continue-on-error: true
 
       - name: 🔐 Checksums
         run: |
@@ -217,46 +330,19 @@ jobs:
           echo "" >> RELEASE_NOTES.md
 
       - name: 📦 Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Open-WebUI-Client ${{ env.VERSION }}
+          name: Open-WebUI-Client ${{ env.VERSION }}
           body_path: RELEASE_NOTES.md
           draft: false
           prerelease: false
-
-      - name: 🔼 Upload Android APK Asset
-        uses: actions/upload-release-asset@v1
+          files: |
+            ${{ env.ANDROID_APK }}
+            ${{ env.IOS_IPA }}
+            SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ env.ANDROID_APK }}
-          asset_name: ${{ env.ANDROID_APK }}
-          asset_content_type: application/vnd.android.package-archive
-
-      - name: 🔼 Upload iOS IPA Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ env.IOS_IPA }}
-          asset_name: ${{ env.IOS_IPA }}
-          asset_content_type: application/octet-stream
-
-      - name: 🔼 Upload Checksums
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: SHA256SUMS.txt
-          asset_name: SHA256SUMS.txt
-          asset_content_type: text/plain
 
       - name: 🧾 Ensure and update CHANGELOG.md
         run: |
@@ -282,6 +368,14 @@ jobs:
             git log --pretty=format:'- %s (%h)' $GITHUB_REF_NAME >> CHANGELOG.md
           fi
 
+      - name: 🧹 Clean up old release branch
+        run: |
+          BRANCH="chore/release-${{ env.VERSION }}"
+          if git ls-remote --exit-code --heads origin "$BRANCH"; then
+            echo "Deleting existing branch $BRANCH"
+            git push origin --delete "$BRANCH" || true
+          fi
+
       - name: 🧾 Open PR to update CHANGELOG.md and versions
         uses: peter-evans/create-pull-request@v6
         with:
@@ -293,5 +387,16 @@ jobs:
             CHANGELOG.md
             app.json
             package.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📋 Diagnostic Info on Failure
+        if: failure()
+        run: |
+          echo "## 🔍 Failure Diagnostics" >> $GITHUB_STEP_SUMMARY
+          echo "### Build artifacts:" >> $GITHUB_STEP_SUMMARY
+          ls -lah *.json *.txt 2>/dev/null | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY || echo "No artifacts found" >> $GITHUB_STEP_SUMMARY
+          echo "### Environment variables:" >> $GITHUB_STEP_SUMMARY
+          env | grep -E "(BUILD_ID|VERSION|APK|IPA)" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY || echo "No relevant env vars" >> $GITHUB_STEP_SUMMARY
+          echo "### EAS CLI version:" >> $GITHUB_STEP_SUMMARY
+          eas --version >> $GITHUB_STEP_SUMMARY

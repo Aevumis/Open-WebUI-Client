@@ -93,8 +93,8 @@ jobs:
           # Try different command variations
           if eas build:view "$ID" --json > build_view_raw.json 2>&1; then
             echo "Successfully fetched build details"
-            # Extract only the JSON part (everything from first { to last })
-            sed -n '/{/,/}/p' build_view_raw.json > build_view.json
+            # Robust extraction from first { to last } using node
+            node -e "const fs=require('fs');const s=fs.readFileSync(0,'utf8');const i=s.indexOf('{'),j=s.lastIndexOf('}');if(i>=0&&j>=0)console.log(s.substring(i,j+1))" < build_view_raw.json > build_view.json
             # Verify we have valid JSON
             if jq empty build_view.json 2>/dev/null; then
               echo "Valid JSON extracted"
