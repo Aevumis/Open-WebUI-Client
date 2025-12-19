@@ -123,7 +123,7 @@ jobs:
 
             # Try text format parsing
             if eas build:view "$ID" > android_view_text.txt 2>&1; then
-              URL=$(grep "^Artifact" android_view_text.txt | awk "{print \$2}")
+              URL=$(grep "^Artifact" android_view_text.txt | awk '{print $2}')
               if [ -n "$URL" ]; then
                 echo "{\"artifacts\":{\"buildUrl\":\"$URL\"}}" > android_view.json
                 echo "Extracted URL from text: $URL"
@@ -161,7 +161,7 @@ jobs:
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
             echo "Could not resolve Android artifact URL from JSON, checking text fallback..."
             if [ -f android_view_text.txt ]; then
-              URL=$(grep "^Artifact" android_view_text.txt | awk "{print \$2}")
+              URL=$(grep "^Artifact" android_view_text.txt | awk '{print $2}')
             fi
           fi
 
@@ -218,7 +218,7 @@ jobs:
 
             # Try text format parsing
             if eas build:view "$ID" > ios_view_text.txt 2>&1; then
-              URL=$(grep "^Artifact" ios_view_text.txt | awk "{print \$2}")
+              URL=$(grep "^Artifact" ios_view_text.txt | awk '{print $2}')
               if [ -n "$URL" ]; then
                 echo "{\"artifacts\":{\"buildUrl\":\"$URL\"}}" > ios_view.json
                 echo "Extracted URL from text: $URL"
@@ -256,7 +256,7 @@ jobs:
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
             echo "Could not resolve iOS artifact URL from JSON, checking text fallback..."
             if [ -f ios_view_text.txt ]; then
-              URL=$(grep "^Artifact" ios_view_text.txt | awk "{print \$2}")
+              URL=$(grep "^Artifact" ios_view_text.txt | awk '{print $2}')
             fi
           fi
 
@@ -387,8 +387,8 @@ jobs:
             CHANGELOG.md
             app.json
             package.json
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📋 Diagnostic Info on Failure
         if: failure()
