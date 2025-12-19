@@ -1,49 +1,29 @@
+import { Camera } from "expo-camera";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
+import * as WebBrowser from "expo-web-browser";
 import React, { useCallback, useMemo, useRef } from "react";
 import { Alert, Platform, useColorScheme } from "react-native";
-import { WebView, WebViewMessageEvent } from "react-native-webview";
-import * as WebBrowser from "expo-web-browser";
-import * as FileSystem from "expo-file-system";
-import * as Sharing from "expo-sharing";
-import { Camera } from "expo-camera";
-import * as Haptics from "expo-haptics";
 import Toast from "react-native-toast-message";
+import { WebView, WebViewMessageEvent } from "react-native-webview";
 
-import { cacheApiResponse, type CachedEntry } from "../lib/cache";
-import {
-  enqueue,
-  setToken,
-  count,
-  getToken,
-  listOutbox,
-  removeOutboxItems,
-  getSettings,
-} from "../lib/outbox";
-import { debug as logDebug, info as logInfo } from "../lib/log";
-import {
-  WEBVIEW_LOAD_TIMEOUT,
-  AUTH_POLLING_INTERVAL,
-  AUTH_CAPTURE_TIMEOUT,
-  SW_READY_WAIT,
-  SW_DETECTION_DELAY,
-  WEBVIEW_DRAIN_TIMEOUT,
-  WEBVIEW_DRAIN_CHECK_INTERVAL,
-} from "../lib/constants";
-import { safeGetHost, safeParseUrl } from "../lib/url-utils";
-import { STORAGE_KEYS } from "../lib/storage-keys";
+import { useWebViewHandlers } from "../hooks/useWebViewHandlers";
+import { WEBVIEW_DRAIN_CHECK_INTERVAL, WEBVIEW_DRAIN_TIMEOUT } from "../lib/constants";
 import { getErrorMessage } from "../lib/error-utils";
-import { getStorageJSON, setStorageJSON, removeStorageItem } from "../lib/storage-utils";
-import { WebViewMessage, ChatCompletionBody, ConversationData } from "../lib/types";
+import { debug as logDebug, info as logInfo } from "../lib/log";
+import { count, getSettings, getToken, listOutbox } from "../lib/outbox";
+import { WebViewMessage } from "../lib/types";
+import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 import {
-  buildInjection,
-  buildThemeBootstrap,
-  buildDrainBatchJS,
-  buildSyncJS,
-  buildConnectivityJS,
-  buildThemeProbeJS,
   buildApplyColorSchemeJS,
   buildCleanupJS,
+  buildConnectivityJS,
+  buildDrainBatchJS,
+  buildInjection,
+  buildSyncJS,
+  buildThemeBootstrap,
+  buildThemeProbeJS,
 } from "../lib/webview-scripts";
-import { useWebViewHandlers } from "../hooks/useWebViewHandlers";
 
 type WebViewPermissionRequest = {
   resources: string[];
@@ -148,12 +128,16 @@ export default function OpenWebUIView({
   const onMessage = useCallback(
     async (e: WebViewMessageEvent) => {
       try {
-        const msg: WebViewMessage = JSON.parse(e.nativeEvent.data || "{}");
+        const raw = String(e.nativeEvent.data || "{}");
+        const msg: WebViewMessage = JSON.parse(raw);
         const host = safeGetHost(baseUrl);
         if (!host) return;
 
         switch (msg.type) {
           case "debug":
+            if (msg.event === "evalError") {
+              logDebug("webview", "evalErrorRaw", { raw });
+            }
             handlers.handleDebug(msg);
             if (msg.event === "boot") {
               const tok = await getToken(host);
@@ -362,7 +346,7 @@ export default function OpenWebUIView({
             `(function(){try{window.ReactNativeWebView&&window.ReactNativeWebView.postMessage('{"type":"debug","scope":"probe","event":"ping"}')}catch(e){}})();`
           );
           // Safe-eval wrapper to catch syntax/runtime errors of the injected bundle
-          const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
+          const WRAP = `(function(){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'injectStart'}));var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',wrapV:'3',name:String(e&&e.name||''),message:String(e&&e.message||e),stack:String(e&&e.stack||'')}))}catch(_){} }})();`;
           webref.current?.injectJavaScript(WRAP);
           // Report whether our guard flag is set in page context
           webref.current?.injectJavaScript(
@@ -381,7 +365,7 @@ export default function OpenWebUIView({
         try {
           logDebug("webview", "nav change", navState.url);
           webref.current?.injectJavaScript(`${injected};true;`);
-          const WRAP = `(function(){try{var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',message:String(e&&e.message||e)}))}catch(_){} }})();`;
+          const WRAP = `(function(){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'injectStart'}));var CODE=${JSON.stringify(injected)}; (new Function('code', 'return eval(code)'))(CODE);}catch(e){try{window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'evalError',wrapV:'3',name:String(e&&e.name||''),message:String(e&&e.message||e),stack:String(e&&e.stack||'')}))}catch(_){} }})();`;
           webref.current?.injectJavaScript(WRAP);
           webref.current?.injectJavaScript(
             `(function(){try{var v=!!window.__owui_injected;window.ReactNativeWebView.postMessage(JSON.stringify({type:'debug',scope:'probe',event:'hasInjected',val:v}))}catch(e){}})();`

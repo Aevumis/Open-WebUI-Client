@@ -1,8 +1,8 @@
 import {
-  WEBVIEW_LOAD_TIMEOUT,
-  AUTH_POLLING_INTERVAL,
   AUTH_CAPTURE_TIMEOUT,
+  AUTH_POLLING_INTERVAL,
   SW_READY_WAIT,
+  WEBVIEW_LOAD_TIMEOUT,
 } from "./constants";
 import { safeGetHost } from "./url-utils";
 
@@ -271,8 +271,15 @@ export function buildInjectionAuthCapture() {
   return `
     function getCookie(name) {
       try {
-        const m = (document.cookie || '').match(new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()\\\[\]\\\\/\+^])/g, '\\$1') + '=([^;]*)'));
-        return m ? decodeURIComponent(m[1]) : null;
+        const parts = (document.cookie || '').split(';');
+        for (var i = 0; i < parts.length; i++) {
+          var kv = (parts[i] || '').trim();
+          if (!kv) continue;
+          if (kv.indexOf(name + '=') === 0) {
+            return decodeURIComponent(kv.slice(name.length + 1));
+          }
+        }
+        return null;
       } catch (_) { return null; }
     }
 
@@ -459,6 +466,42 @@ export function buildInjectionFetchInterception() {
       });
     }
 
+    function parseContentDispositionFilename(disp) {
+      try {
+        var s = String(disp || '');
+        if (!s) return 'download';
+
+        var idxStar = s.toLowerCase().indexOf('filename*=');
+        if (idxStar >= 0) {
+          var after = s.slice(idxStar + 'filename*='.length);
+          var semi = after.indexOf(';');
+          if (semi >= 0) after = after.slice(0, semi);
+          after = after.trim();
+          if ((after[0] === '"' && after[after.length - 1] === '"') || (after[0] === "'" && after[after.length - 1] === "'")) {
+            after = after.slice(1, -1);
+          }
+          var parts = after.split("''");
+          var val = parts.length >= 2 ? parts.slice(1).join("''") : after;
+          try { return decodeURIComponent(val); } catch (_) { return val || 'download'; }
+        }
+
+        var idx = s.toLowerCase().indexOf('filename=');
+        if (idx >= 0) {
+          var after2 = s.slice(idx + 'filename='.length);
+          var semi2 = after2.indexOf(';');
+          if (semi2 >= 0) after2 = after2.slice(0, semi2);
+          after2 = after2.trim();
+          if ((after2[0] === '"' && after2[after2.length - 1] === '"') || (after2[0] === "'" && after2[after2.length - 1] === "'")) {
+            after2 = after2.slice(1, -1);
+          }
+          return after2 || 'download';
+        }
+        return 'download';
+      } catch (_) {
+        return 'download';
+      }
+    }
+
     // Capture Authorization from XMLHttpRequest as well (e.g., axios)
     try {
       const XHR = window.XMLHttpRequest;
@@ -584,8 +627,7 @@ export function buildInjectionFetchInterception() {
             const clone = res.clone();
             const blob = await clone.blob();
             const b64 = await readBlobAsBase64(blob);
-            const nameMatch = /filename\\*=UTF-8''([^;]+)|filename="?([^;"\\]+)"?/i.exec(disp);
-            const filename = decodeURIComponent(nameMatch?.[1] || nameMatch?.[2] || 'download');
+            const filename = parseContentDispositionFilename(disp);
             post({ type: 'downloadBlob', filename, mime: ct, base64: b64 });
           }
         }

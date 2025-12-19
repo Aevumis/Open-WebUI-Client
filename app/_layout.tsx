@@ -1,8 +1,8 @@
 import { Stack } from "expo-router";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import Toast from "react-native-toast-message";
-import { setLogConfig } from "../lib/log";
 import { ErrorBoundary } from "../components/ErrorBoundary";
+import { setLogConfig } from "../lib/log";
 
 export default function RootLayout() {
   // Global logger config: adjust here to control verbosity and scopes
@@ -10,8 +10,8 @@ export default function RootLayout() {
     level: typeof __DEV__ !== "undefined" && __DEV__ ? "debug" : "info",
     scopes:
       typeof __DEV__ !== "undefined" && __DEV__
-        ? ["webview", "injection", "sync", "outbox", "permissions"]
-        : ["webview", "injection", "permissions"],
+        ? ["webview", "injection", "sync", "outbox", "offline", "permissions"]
+        : ["webview", "injection", "offline", "permissions"],
   });
   return (
     <SafeAreaProvider>
