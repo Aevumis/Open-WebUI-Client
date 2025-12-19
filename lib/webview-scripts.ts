@@ -448,7 +448,7 @@ export function buildInjectionFetchInterception() {
   return `
     function shouldCache(url) {
       try {
-        const u = new URL(url);
+        const u = new URL(url, window.location.href);
         if (u.host !== host) return false;
         // Exact conversation endpoint pattern as provided: /api/v1/chats/:id
         return /^\\/api\\/v1\\/chats\\/[0-9a-fA-F-]+$/.test(u.pathname);
@@ -615,11 +615,13 @@ export function buildInjectionFetchInterception() {
       } catch (_) {}
       try {
         const url = typeof input === 'string' ? input : input.url;
+        var absUrl = url;
+        try { absUrl = new URL(url, window.location.href).toString(); } catch(_) { absUrl = url; }
         const ct = res.headers.get('content-type') || '';
-        if (ct.includes('application/json') && shouldCache(url)) {
+        if (ct.includes('application/json') && shouldCache(absUrl)) {
           const clone = res.clone();
           const data = await clone.json();
-          post({ type: 'cacheResponse', url, data });
+          post({ type: 'cacheResponse', url: absUrl, data });
         } else if ((ct.includes('application/octet-stream') || ct.includes('application/pdf') || ct.includes('image/') || ct.includes('zip') || ct.includes('ms-') || ct.includes('officedocument')) && url) {
           // Likely a download; attempt to capture
           const disp = res.headers.get('content-disposition') || '';
@@ -824,29 +826,90 @@ export function buildDrainBatchJS(batch: any[], timeout: number, interval: numbe
 /**
  * Generates JS to perform a webview-assisted full sync.
  */
-export function buildSyncJS() {
+export function buildSyncJS(opts: {
+  expectedHost: string;
+  maxConversations: number;
+  timeoutMs: number;
+}) {
+  const allowedHost = JSON.stringify(opts.expectedHost || "");
+  const maxConversations = Math.max(1, Math.floor(opts.maxConversations || 50));
+  const timeoutMs = Math.max(1000, Math.floor(opts.timeoutMs || 15000));
   return `(() => { (async function(){
     function post(m){ try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(m)); } catch(_){} }
     try {
-      const res = await fetch('/api/v1/chats');
-      if (!res.ok) throw new Error('Status ' + res.status);
-      const list = await res.json();
-      const conversations = Array.isArray(list) ? list : (list && list.conversations) || [];
-      let msgCount = 0;
-      for (let c of conversations) {
+      if (window.__owui_webSyncRunning) return;
+      window.__owui_webSyncRunning = true;
+
+      var expectedHost = ${allowedHost};
+      try {
+        if (expectedHost && window.location && window.location.host && window.location.host !== expectedHost) {
+          post({ type: 'debug', scope: 'injection', event: 'syncError', message: 'Host mismatch', expectedHost: expectedHost, actualHost: window.location.host });
+          return;
+        }
+      } catch(_){}
+
+      function fetchWithTimeout(url, opts){
         try {
-          if (c.archived) continue;
-          const detailRes = await fetch('/api/v1/chats/' + c.id);
-          if (detailRes.ok) {
-            const data = await detailRes.json();
-            post({ type: 'cacheResponse', url: '/api/v1/chats/' + c.id, data: data });
-            msgCount += (data && data.chat && data.chat.messages && data.chat.messages.length) || 0;
+          var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+          if (controller) {
+            opts = opts || {};
+            opts.signal = controller.signal;
+          }
+          var t = setTimeout(function(){ try { controller && controller.abort && controller.abort(); } catch(_){} }, ${timeoutMs});
+          return fetch(url, opts).finally(function(){ try { clearTimeout(t); } catch(_){} });
+        } catch (e) {
+          return fetch(url, opts);
+        }
+      }
+
+      post({ type: 'debug', scope: 'injection', event: 'syncStart', mode: 'crawler' });
+
+      var conversations = [];
+      var page = 1;
+      while (conversations.length < ${maxConversations}) {
+        var listUrl = '/api/v1/chats/?page=' + page;
+        var res = await fetchWithTimeout(listUrl, { method: 'GET', credentials: 'include' });
+        if (!res || !res.ok) throw new Error('Status ' + (res && res.status));
+        var list = await res.json();
+        var items = Array.isArray(list) ? list : (list && list.conversations) || [];
+        if (!items || !items.length) break;
+        for (var i = 0; i < items.length && conversations.length < ${maxConversations}; i++) {
+          conversations.push(items[i]);
+        }
+        post({ type: 'debug', scope: 'injection', event: 'syncPage', page: page, totalSoFar: conversations.length });
+        page += 1;
+      }
+
+      var msgCount = 0;
+      for (var j = 0; j < conversations.length; j++) {
+        var c = conversations[j];
+        try {
+          if (c && c.archived) continue;
+          var id = c && c.id;
+          if (!id) continue;
+          post({ type: 'debug', scope: 'injection', event: 'syncItem', index: j + 1, total: conversations.length, id: id });
+          var detailPath = '/api/v1/chats/' + id;
+          var detailRes = await fetchWithTimeout(detailPath, { method: 'GET', credentials: 'include' });
+          if (detailRes && detailRes.ok) {
+            var data = await detailRes.json();
+            var abs = detailPath;
+            try { abs = new URL(detailPath, window.location.href).toString(); } catch(_) { abs = detailPath; }
+            post({ type: 'cacheResponse', url: abs, data: data, title: (c && c.title) || undefined });
+            var m = 0;
+            try {
+              m = (data && data.chat && data.chat.messages && data.chat.messages.length) || (data && data.messages && data.messages.length) || 0;
+            } catch(_) { m = 0; }
+            msgCount += m;
           }
         } catch(_){}
       }
+
       post({ type: 'syncDone', conversations: conversations.length, messages: msgCount });
+      post({ type: 'debug', scope: 'injection', event: 'syncComplete', conversations: conversations.length, messages: msgCount });
     } catch (e) {
-      try { post({ type: 'debug', scope: 'injection', event: 'syncError', message: String(e && e.message || e) }); } catch(_){}
+      try { post({ type: 'debug', scope: 'injection', event: 'syncError', message: String(e && e.message || e) }); } catch(_){ }
+    } finally {
+      try { window.__owui_webSyncRunning = false; } catch(_){}
     }
   })(); })();`;
 }

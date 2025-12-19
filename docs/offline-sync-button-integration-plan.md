@@ -93,6 +93,28 @@ Users can trigger **Incremental Sync** and **Full Sync** from the Offline screen
 
 ### Validation (User-testable)
 
+#### Sync Mode Switch (Testing)
+
+You can force which sync strategy runs via the environment variable `EXPO_PUBLIC_SYNC_MODE`.
+
+- `main`:
+  - Native token-based sync only.
+  - WebView crawler is disabled.
+- `crawler`:
+  - WebView crawler/webview-assisted sync only.
+  - Native token-based sync is skipped.
+- `main+fallback` (default):
+  - Native token-based sync runs when possible.
+  - WebView crawler runs only as a fallback (when token is missing).
+
+To set it for local development:
+
+```bash
+EXPO_PUBLIC_SYNC_MODE=crawler npm start
+```
+
+You can also add it to your `.env` (or `.env.local`) if your Expo setup loads env files.
+
 - **Test 1**: With valid login/token captured, press `Sync` and confirm:
   - UI disables buttons while running
   - Success message shows counts

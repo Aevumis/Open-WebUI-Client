@@ -1,6 +1,6 @@
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 
-jest.mock("expo-file-system", () => ({
+jest.mock("expo-file-system/legacy", () => ({
   documentDirectory: "file://mock-directory/",
   makeDirectoryAsync: jest.fn().mockResolvedValue(undefined),
   readAsStringAsync: jest.fn().mockResolvedValue(""),
@@ -9,8 +9,7 @@ jest.mock("expo-file-system", () => ({
   getInfoAsync: jest.fn().mockResolvedValue({ exists: false }),
 }));
 
-import { cacheApiResponse, readCachedEntry, getCacheIndex, recalculateSize } from "../cache";
-import { CACHE_MAX_SIZE_BYTES } from "../constants";
+import { cacheApiResponse, getCacheIndex, readCachedEntry, recalculateSize } from "../cache";
 jest.mock("../url-utils", () => ({
   safeParseUrl: (url: string) => {
     try {

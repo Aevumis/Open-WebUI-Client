@@ -8,10 +8,11 @@ import Toast from "react-native-toast-message";
 import { WebView, WebViewMessageEvent } from "react-native-webview";
 
 import { useWebViewHandlers } from "../hooks/useWebViewHandlers";
-import { WEBVIEW_DRAIN_CHECK_INTERVAL, WEBVIEW_DRAIN_TIMEOUT } from "../lib/constants";
+import { getSyncMode, WEBVIEW_DRAIN_CHECK_INTERVAL, WEBVIEW_DRAIN_TIMEOUT } from "../lib/constants";
 import { getErrorMessage } from "../lib/error-utils";
 import { debug as logDebug, info as logInfo } from "../lib/log";
 import { count, getSettings, getToken, listOutbox } from "../lib/outbox";
+import { isFullSyncDone } from "../lib/sync";
 import { WebViewMessage } from "../lib/types";
 import { safeGetHost, safeParseUrl } from "../lib/url-utils";
 import {
@@ -40,6 +41,7 @@ export default function OpenWebUIView({
   online: boolean;
   onQueueCountChange?: (count: number) => void;
 }) {
+  const syncMode = getSyncMode();
   const webref = useRef<WebView>(null);
   const drainingRef = React.useRef(false);
   const syncingRef = React.useRef(false);
@@ -107,9 +109,18 @@ export default function OpenWebUIView({
   }, []);
 
   // WebView-assisted full sync for when cookies exist but native token is not available (httpOnly)
-  const injectWebSync = useCallback(async () => {
+  const injectWebSync = useCallback(async (host: string, maxConversations: number) => {
     try {
-      const js = buildSyncJS();
+      if (syncingRef.current) return;
+      const safeMax =
+        Number.isFinite(maxConversations) && maxConversations > 0
+          ? Math.floor(maxConversations)
+          : 50;
+      const js = buildSyncJS({
+        expectedHost: host,
+        maxConversations: safeMax,
+        timeoutMs: 15000,
+      });
       syncingRef.current = true;
       webref.current?.injectJavaScript(js);
     } catch (e) {
@@ -139,13 +150,29 @@ export default function OpenWebUIView({
               logDebug("webview", "evalErrorRaw", { raw });
             }
             handlers.handleDebug(msg);
-            if (msg.event === "boot") {
-              const tok = await getToken(host);
+            if (msg.event === "boot" || msg.event === "authPollingTimeout") {
               const settings = await getSettings(host);
-              if (!tok && settings.fullSyncOnLoad) {
-                await injectWebSync();
-              } else if (!settings.fullSyncOnLoad) {
+              const done = await isFullSyncDone(baseUrl);
+
+              if (!settings.fullSyncOnLoad) {
                 logInfo("sync", "fullSyncOnLoad disabled, skip webview-assisted sync");
+                break;
+              }
+
+              if (done && syncMode !== "crawler") break;
+
+              if (syncMode === "main") {
+                break;
+              }
+
+              if (syncMode === "crawler") {
+                await injectWebSync(host, settings.limitConversations);
+                break;
+              }
+
+              const tok = await getToken(host);
+              if (!tok) {
+                await injectWebSync(host, settings.limitConversations);
               }
             }
             break;

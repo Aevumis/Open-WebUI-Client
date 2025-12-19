@@ -25,9 +25,22 @@ export interface WebViewHandlersContext {
 export function useWebViewHandlers(context: WebViewHandlersContext) {
   const { host, drainingRef, syncingRef, onQueueCountChange, injectWebDrainBatch } = context;
 
-  const handleDebug = useCallback((msg: Extract<WebViewMessage, { type: "debug" }>) => {
-    logDebug("webview", "debug", msg);
-  }, []);
+  const handleDebug = useCallback(
+    (msg: Extract<WebViewMessage, { type: "debug" }>) => {
+      logDebug("webview", "debug", msg);
+      try {
+        if (msg.scope === "injection" && msg.event === "syncError") {
+          syncingRef.current = false;
+          Toast.show({
+            type: "error",
+            text1: "Offline sync couldn’t complete",
+            text2: "Open the server and sign in, then retry Sync.",
+          });
+        }
+      } catch (_) {}
+    },
+    [syncingRef]
+  );
 
   const handleAuthToken = useCallback(
     async (msg: Extract<WebViewMessage, { type: "authToken" }>) => {
@@ -263,6 +276,7 @@ export function useWebViewHandlers(context: WebViewHandlersContext) {
         url: msg.url,
         capturedAt: Date.now(),
         data: msg.data as ConversationData,
+        title: typeof msg.title === "string" ? msg.title : undefined,
       };
       await cacheApiResponse(host, entry);
     },
